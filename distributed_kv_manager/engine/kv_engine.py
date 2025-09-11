@@ -3,6 +3,7 @@ import torch
 import logging
 import hashlib
 import time
+from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 from .base import DistributedKVEngineBase, StoreStatus, RetrieveStatus
@@ -52,7 +53,11 @@ class KVEngine(DistributedKVEngineBase):
         return StoreStatus.STORED
 
     def should_retrieve(self, model_input) -> RetrieveStatus:
-        """判断 KV 是否命中缓存"""
+        """
+        判断 KV 是否命中缓存，通过元数据缓存确认：
+        - status == 1 表示写入完成，可以命中
+        - 其他情况视为 MISS
+        """
         input_tokens = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
 
@@ -69,23 +74,23 @@ class KVEngine(DistributedKVEngineBase):
                 session_id=getattr(model_input, "session_id", None),
             )
 
-            logger.debug(f"检查序列 {file_path}: meta={meta}, status={getattr(meta, 'status', None) if meta else None}")
-
             if meta is None or meta.status != 1:
                 # 元数据不存在或者状态不是已提交，则 MISS
-                logger.debug(f"序列 {file_path} 未命中缓存")
                 return RetrieveStatus.MISS
 
         # 所有序列都存在且已提交
         logger.debug(f"KV Cache 命中")
         return RetrieveStatus.HIT
 
+    def close(self):
+        print("[KV ENGINE CLOSED]")
+
     def store_kv(self, model_config, parallel_config, transfer_config,
-                model_executable, model_input, kv_caches, store_status):
+            model_executable, model_input, kv_caches, store_status):
         """基于元数据缓存的两阶段提交写入 KV 缓存和隐藏状态（异步提交）"""
         input_tokens = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
-        slot_mapping = model_input.attn_metadata.slot_mapping
+        slot_mapping = model_input.attn_metadata.slot_mapping  # 保持二维形状
         num_layers = len(kv_caches)
 
         for seq_idx, seq_len in enumerate(seq_lens):
@@ -128,11 +133,15 @@ class KVEngine(DistributedKVEngineBase):
             for layer_idx in range(num_layers):
                 kv_cache = kv_caches[layer_idx]
                 key_cache, value_cache = self.split_kv_cache(kv_cache)
-                current_slots = slot_mapping[start_pos:end_pos].flatten()
+                
+                # 关键修改：确保只存储当前序列的KV缓存
+                # 使用序列索引获取当前序列的槽位映射
+                current_slots = slot_mapping[seq_idx].flatten()
+                
+                # 确保只选择当前序列的KV缓存
                 all_keys.append(key_cache[current_slots].unsqueeze(0))
                 all_values.append(value_cache[current_slots].unsqueeze(0))
 
-            # 确保 all_keys 和 all_values 是张量
             all_keys = torch.cat(all_keys, dim=0) if all_keys else torch.tensor([])
             all_values = torch.cat(all_values, dim=0) if all_values else torch.tensor([])
             
@@ -142,31 +151,47 @@ class KVEngine(DistributedKVEngineBase):
                 hidden_state = hidden_state[start_pos:end_pos]
 
             # ------------------ 第四步：异步写入 KV 和更新元数据 ------------------ #
-            def insert_and_update(seq_idx=seq_idx, file_path=file_path, all_keys=all_keys, 
-                            all_values=all_values, hidden_state=hidden_state, 
-                            current_tokens=current_tokens, roi=roi, meta=meta):
-                try:
-                    logger.debug(f"开始处理序列 {seq_idx}: {file_path}")
-                    
-                    # 写入存储
-                    self._storage_insert(file_path, all_keys, all_values, hidden_state, current_tokens, roi)
-                    logger.debug(f"序列 {seq_idx} 存储完成")
-                    
-                    # 写入完成后更新元数据
-                    keys_size = all_keys.numel() * all_keys.element_size() if all_keys.numel() > 0 else 0
-                    values_size = all_values.numel() * all_values.element_size() if all_values.numel() > 0 else 0
-                    meta.file_size = keys_size + values_size
-                    meta.status = 1  # 写入完成
-                    meta.last_access = int(time.time())
-                    
-                    # 使用缓存 put 更新元数据
-                    self._meta_cache.put_metadata(meta)
-                    logger.debug(f"序列 {seq_idx} 元数据更新完成，状态: {meta.status}")
-                    
-                except Exception as e:
-                    logger.error(f"存储序列 {seq_idx} ({file_path}) 失败: {e}", exc_info=True)
-            
-            future = self._executor.submit(insert_and_update)
+            # 使用辅助类确保变量正确捕获
+            class InsertAndUpdateTask:
+                def __init__(self, engine, seq_idx, file_path, all_keys, all_values, 
+                            hidden_state, current_tokens, roi, meta):
+                    self.engine = engine
+                    self.seq_idx = seq_idx
+                    self.file_path = file_path
+                    self.all_keys = all_keys
+                    self.all_values = all_values
+                    self.hidden_state = hidden_state
+                    self.current_tokens = current_tokens
+                    self.roi = roi
+                    self.meta = meta
+                
+                def __call__(self):
+                    try:
+                        logger.debug(f"开始处理序列 {self.seq_idx}: {self.file_path}")
+                        
+                        # 写入存储
+                        self.engine._storage_insert(self.file_path, self.all_keys, self.all_values, 
+                                                self.hidden_state, self.current_tokens, self.roi)
+                        logger.debug(f"序列 {self.seq_idx} 存储完成")
+                        
+                        # 写入完成后更新元数据
+                        keys_size = self.all_keys.numel() * self.all_keys.element_size() if self.all_keys.numel() > 0 else 0
+                        values_size = self.all_values.numel() * self.all_values.element_size() if self.all_values.numel() > 0 else 0
+                        self.meta.file_size = keys_size + values_size
+                        self.meta.status = 1  # 写入完成
+                        self.meta.last_access = int(time.time())
+                        
+                        # 使用缓存 put 更新元数据
+                        self.engine._meta_cache.put_metadata(self.meta)
+                        logger.debug(f"序列 {self.seq_idx} 元数据更新完成，状态: {self.meta.status}")
+                        
+                    except Exception as e:
+                        logger.error(f"存储序列 {self.seq_idx} ({self.file_path}) 失败: {e}", exc_info=True)
+
+            # 创建任务实例并提交
+            task = InsertAndUpdateTask(self, seq_idx, file_path, all_keys, all_values, 
+                                    hidden_state, current_tokens, roi, meta)
+            future = self._executor.submit(task)
             self._futures.append(future)
 
     def retrieve_kv(self, model_executable, model_input, kv_caches, retrieve_status):
@@ -176,13 +201,15 @@ class KVEngine(DistributedKVEngineBase):
         """
         input_tokens = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
-        slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+        slot_mapping = model_input.attn_metadata.slot_mapping  # 保持二维形状
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         num_layers = len(kv_caches)
 
         all_hidden_states = []
         bypass_model_exec = (retrieve_status == RetrieveStatus.HIT)
 
+        logger.debug(f"开始检索KV，检索状态: {retrieve_status}, 序列数量: {len(seq_lens)}")
+        
         for seq_idx, seq_len in enumerate(seq_lens):
             start_pos = sum(seq_lens[:seq_idx])
             end_pos = start_pos + seq_len
@@ -199,22 +226,53 @@ class KVEngine(DistributedKVEngineBase):
                 continue  # 没命中，直接交给模型执行
 
             # 元数据命中，则读取 KV
+            logger.debug(f"检索序列 {seq_idx}: {file_path}")
             key, value, hidden = self._storage_download(file_path)
+            
             if key is None or value is None or hidden is None:
+                logger.warning(f"序列 {seq_idx} 检索失败，文件可能不存在或损坏")
                 bypass_model_exec = False
                 continue
 
             device = input_tokens.device
             key, value, hidden = key.to(device), value.to(device), hidden.to(device)
 
-            current_slots = slot_mapping[start_pos:end_pos]
-            for layer_idx in range(num_layers):
-                layer_k, layer_v = key[layer_idx], value[layer_idx]
-                kv_cache = kv_caches[layer_idx]
-                key_cache, value_cache = self.split_kv_cache(kv_cache)
-                key_cache[current_slots] = layer_k
-                value_cache[current_slots] = layer_v
-                kv_caches[layer_idx] = torch.stack([key_cache, value_cache], dim=0)
+            # 打印检索到的KV形状信息
+            logger.debug(f"检索到的KV形状 - key: {key.shape}, value: {value.shape}, hidden: {hidden.shape if hidden is not None else 'None'}")
+            
+            # 关键修改：使用序列索引获取当前序列的槽位映射
+            current_slots = slot_mapping[seq_idx]
+            logger.debug(f"当前槽位: {current_slots}, 形状: {current_slots.shape}")
+
+            try:
+                for layer_idx in range(num_layers):
+                    layer_k, layer_v = key[layer_idx], value[layer_idx]
+                    kv_cache = kv_caches[layer_idx]
+                    key_cache, value_cache = self.split_kv_cache(kv_cache)
+                    
+                    # 打印形状信息，帮助诊断问题
+                    logger.debug(f"层 {layer_idx}: layer_k形状: {layer_k.shape}, layer_v形状: {layer_v.shape}")
+                    logger.debug(f"层 {layer_idx}: key_cache形状: {key_cache.shape}, value_cache形状: {value_cache.shape}")
+                    logger.debug(f"层 {layer_idx}: 当前槽位形状: {current_slots.shape}")
+                    
+                    # 检查形状是否匹配
+                    if layer_k.shape[0] != len(current_slots):
+                        logger.error(f"形状不匹配: 层 {layer_idx} 的KV缓存有 {layer_k.shape[0]} 个token, 但槽位映射有 {len(current_slots)} 个槽位")
+                        bypass_model_exec = False
+                        break
+                        
+                    # 尝试赋值，如果失败会抛出异常
+                    key_cache[current_slots] = layer_k
+                    value_cache[current_slots] = layer_v
+                    kv_caches[layer_idx] = torch.stack([key_cache, value_cache], dim=0)
+                    
+            except Exception as e:
+                logger.error(f"在序列 {seq_idx} 层 {layer_idx} 处理KV缓存时发生错误: {e}")
+                logger.error(f"key_cache形状: {key_cache.shape}, layer_k形状: {layer_k.shape}")
+                logger.error(f"current_slots: {current_slots}")
+                bypass_model_exec = False
+                # 重新抛出异常，以便外部捕获
+                raise
 
             all_hidden_states.append(hidden)
 
@@ -262,19 +320,12 @@ class KVEngine(DistributedKVEngineBase):
         return self._storage.exists(file_path)
 
     def close(self):
-        logger.debug(f"等待 {len(self._futures)} 个异步任务完成")
-        
-        for i, f in enumerate(self._futures):
+        for f in self._futures:
             try:
-                # 设置更长的超时时间
-                f.result(timeout=120)
-                logger.debug(f"异步任务 {i} 完成")
+                f.result(timeout=60)
             except Exception as e:
-                logger.error(f"异步任务 {i} 失败: {e}", exc_info=True)
-        
+                logger.error(f"KV 异步存储失败: {e}")
         self._executor.shutdown(wait=True)
-        logger.debug("所有异步任务处理完成")
-        print("[KV ENGINE CLOSED]")
 
 # --- module-level engine wrapper ---
 from .base import StoreStatus, RetrieveStatus
