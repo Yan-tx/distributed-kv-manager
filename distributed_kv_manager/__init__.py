@@ -20,6 +20,7 @@ from .storage import (
     AbstractStorage,
     CrailStorage,
     LocalStorage,
+    CachingStorage,
     StorageFactory
 )
 
@@ -44,5 +45,6 @@ __all__ = [
     'AbstractStorage',
     'CrailStorage',
     'LocalStorage',
+    'CachingStorage',
     'StorageFactory'
 ]

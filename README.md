@@ -67,7 +67,11 @@ The system can be configured through the `kv_transfer_config` object with the fo
 config.kv_transfer_config = SimpleNamespace(
     storage_type="crail",        # or "local"
     storage_dir="/kvcache",      # Base directory for storage
-    etcd_endpoints=["127.0.0.1:2379"]  # ETCD endpoints
+    etcd_endpoints=["127.0.0.1:2379"],  # ETCD endpoints
+    # SSD缓存配置
+    enable_ssd_caching=False,    # 是否启用SSD缓存
+    ssd_cache_dir="/tmp/ssd_cache",  # SSD缓存目录
+    enable_prefetch=True         # 是否启用预取
 )
 ```
 
@@ -75,6 +79,7 @@ config.kv_transfer_config = SimpleNamespace(
 
 - **Crail Storage**: Set `storage_type="crail"` and configure `crail_dir`
 - **Local Storage**: Set `storage_type="local"` and configure `local_dir`
+- **SSD Caching**: Enable SSD caching by setting `enable_ssd_caching=True` and configure `ssd_cache_dir`
 
 ## Usage
 
