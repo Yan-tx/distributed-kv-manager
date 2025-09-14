@@ -65,13 +65,16 @@ class KVEngine(DistributedKVEngineBase):
             start_pos = sum(seq_lens[:seq_idx])
             end_pos = start_pos + seq_len
             current_tokens = input_tokens[start_pos:end_pos]
-            file_path = self._make_key(current_tokens)
+            # 获取session_id和layer_id
+            session_id = getattr(model_input, "session_id", None)
+            layer_id = getattr(model_input, "layer_id", None)
+            file_path = self._make_key(current_tokens, session_id, layer_id)
 
             # 从 MetadataCache 访问元数据
             meta = self._meta_cache.get_metadata(
                 key=file_path,
-                layer_id=getattr(model_input, "layer_id", None),
-                session_id=getattr(model_input, "session_id", None),
+                layer_id=layer_id,
+                session_id=session_id,
             )
 
             if meta is None or meta.status != 1:
@@ -97,13 +100,16 @@ class KVEngine(DistributedKVEngineBase):
             start_pos = sum(seq_lens[:seq_idx])
             end_pos = start_pos + seq_len
             current_tokens = input_tokens[start_pos:end_pos]
-            file_path = self._make_key(current_tokens)
+            # 获取session_id和layer_id
+            session_id = getattr(model_input, "session_id", None)
+            layer_id = getattr(model_input, "layer_id", None)
+            file_path = self._make_key(current_tokens, session_id, layer_id)
 
             # ------------------ 第一步：查询元数据缓存 ------------------ #
             existing_meta = self._meta_cache.get_metadata(
                 key=file_path,
-                layer_id=getattr(model_input, "layer_id", None),
-                session_id=getattr(model_input, "session_id", None),
+                layer_id=layer_id,
+                session_id=session_id,
             )
             if existing_meta is not None and existing_meta.status == 1:
                 logger.debug(f"序列 {file_path} 已存在缓存（通过元数据缓存确认），跳过存储")
@@ -111,8 +117,8 @@ class KVEngine(DistributedKVEngineBase):
 
             # ------------------ 第二步：写入元数据缓存（锁定状态） ------------------ #
             meta = KVMetadata(
-                session_id=b"session_0000",  # 可根据实际生成
-                layer_id=0,                  # 可以按 layer 细化
+                session_id=session_id if session_id is not None else b"session_0000",  # 使用实际的session_id或默认值
+                layer_id=layer_id if layer_id is not None else 0,                  # 使用实际的layer_id或默认值
                 token_idx=f"{start_pos}-{end_pos}",
                 file_path=file_path,
                 file_size=0,                 # 先填0，实际大小写入完成后更新
@@ -219,7 +225,10 @@ class KVEngine(DistributedKVEngineBase):
                 continue
 
             current_tokens = input_tokens[start_pos:end_pos]
-            file_path = self._make_key(current_tokens)
+            # 获取session_id和layer_id
+            session_id = getattr(model_input, "session_id", None)
+            layer_id = getattr(model_input, "layer_id", None)
+            file_path = self._make_key(current_tokens, session_id, layer_id)
             roi = torch.ones_like(current_tokens, dtype=torch.bool)
 
             if not bypass_model_exec:
@@ -297,9 +306,16 @@ class KVEngine(DistributedKVEngineBase):
         tensor_bytes = tensor.cpu().numpy().tobytes()
         return hashlib.blake2b(tensor_bytes).hexdigest()
 
-    def _make_key(self, input_tokens: torch.Tensor) -> str:
+    def _make_key(self, input_tokens: torch.Tensor, session_id: bytes = None, layer_id: int = None) -> str:
         seq_hash = self._tensor_hash(input_tokens)
-        return os.path.join(self.storage_dir, f"kv_{seq_hash}.pt")
+        # 如果没有提供session_id和layer_id，使用默认值
+        if session_id is None:
+            session_id = b"session_0000"
+        if layer_id is None:
+            layer_id = 0
+        # 将session_id转换为字符串
+        session_str = session_id.decode('utf-8') if isinstance(session_id, bytes) else str(session_id)
+        return os.path.join(self.storage_dir, f"kv_{session_str}_layer_{layer_id}_{seq_hash}.pt")
     
     def _storage_insert(self, file_path: str, k_cache, v_cache, hidden, input_tokens, roi):
         """使用存储后端打包并上传数据"""
