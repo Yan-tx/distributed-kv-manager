@@ -52,7 +52,7 @@ Three-tier caching system for metadata:
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone [<repository-url>](https://github.com/Yan-tx/distributed-kv-manager.git)
 cd distributed_kv_manager
 
 # Install the package
