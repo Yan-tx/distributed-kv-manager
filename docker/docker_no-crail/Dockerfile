@@ -27,8 +27,8 @@ RUN python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/si
     pip install numpy==1.24.4 sentencepiece==0.1.99 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 拷贝 vLLM 源码和 cutlass 子模块（防止编译阶段失败）
-COPY vllm /root/vllm
-COPY cutlass /root/vllm/.deps/cutlass-src
+# RUN git clone  /root/vllm
+# COPY cutlass /root/vllm/.deps/cutlass-src
 
 # 设置编译环境变量
 ENV MAX_JOBS=20
