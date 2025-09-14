@@ -6,5 +6,5 @@ build-backend = "setuptools.build_meta"
 name = "distributed_kv_manager"
 version = "0.1.0"
 description = "Distributed KV Manager with Crail integration"
-authors = [{ name="", email="yan_tx@sjtu.edu.cn" }]
+authors = [{ name="Yan Tiexin", email="yan_tx@sjtu.edu.cn" }]
 dependencies = []
