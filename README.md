@@ -141,7 +141,6 @@ distributed_kv_manager/
 ├── metadata/            # Metadata management and caching
 ├── storage/             # Storage backend implementations
 ├── __init__.py          # Package initialization
-├── test_crail_kvcache/  # Crail KV cache tests
 └── tests/               # Test files
 ```
 
