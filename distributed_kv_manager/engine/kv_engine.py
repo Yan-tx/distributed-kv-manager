@@ -81,6 +81,12 @@ class KVEngine(DistributedKVEngineBase):
             if meta is None or meta.status != 1:
                 # 元数据不存在或者状态不是已提交，则 MISS
                 return RetrieveStatus.MISS
+                
+            # 检查元数据是否已过期
+            if meta.is_expired():
+                # 元数据已过期，则 MISS
+                logger.debug(f"元数据已过期: {file_path}")
+                return RetrieveStatus.MISS
 
         # 所有序列都存在且已提交
         logger.debug(f"KV Cache 命中")
