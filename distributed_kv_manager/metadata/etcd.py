@@ -419,14 +419,14 @@ class KVMetadataManager:
             # 获取所有以prefix开头的键
             keys = []
             try:
-                # 使用简单的前缀查询
-                response = client.get_prefix(self.prefix)
-                for value, meta in response:
+                # 使用etcd3的get_prefix方法
+                for value, meta in client.get_prefix(self.prefix):
                     key = meta.key.decode('utf-8')
                     # 去掉prefix和开头的斜杠
                     if key.startswith(self.prefix):
                         clean_key = key[len(self.prefix):].lstrip('/')
-                        keys.append(clean_key)
+                        if clean_key:  # 确保不是空字符串
+                            keys.append(clean_key)
             except Exception as e:
                 print(f"Failed to scan metadata keys: {e}")
             return keys
