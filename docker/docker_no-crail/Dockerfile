@@ -47,7 +47,6 @@ RUN pip install \
 
 #测试元数据时若若不用构建vLLM 可以先注释掉 
 # RUN pip install -e /root/vllm
-# RUN cp /root/distributed_kv_manager/vllm_adapter/* /root/vllm/vllm/distributed/kv_transfer/kv_connector/
 RUN pip install transformers==4.53.2
 
 RUN pip install --upgrade pip setuptools wheel packaging
@@ -63,7 +62,8 @@ RUN mkdir -p /root/etcd && \
     rm etcd-v3.6.4-linux-amd64.tar.gz
 RUN mkdir -p /tmp/etcd-data
 
-RUN git cole https://github.com/Yan-tx/distributed-kv-manager.git /root/distributed_kv_manager
+RUN git clone https://github.com/Yan-tx/distributed-kv-manager.git /root/distributed_kv_manager
+RUN cp /root/distributed_kv_manager/vllm_adapter/* /root/vllm/vllm/distributed/kv_transfer/kv_connector/
 RUN pip install -e /root/distributed_kv_manager
 
 WORKDIR /root
