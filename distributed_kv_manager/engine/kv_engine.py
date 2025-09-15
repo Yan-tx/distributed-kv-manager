@@ -47,6 +47,13 @@ class KVEngine(DistributedKVEngineBase):
 
         # metadata cache
         self._meta_cache = MetadataCache(meta_manager=self._meta)
+        
+        # cleanup manager
+        # 读取配置的清理间隔时间，默认1小时
+        cleanup_interval = getattr(config.kv_transfer_config, "cleanup_interval", 3600)
+        from distributed_kv_manager.metadata.cleanup import KVCleanupManager
+        self._cleanup_manager = KVCleanupManager(self._meta, cleanup_interval, self._storage)
+        self._cleanup_manager.start()
 
     # ------------------ KV 存储/检索 ------------------ #
     def should_store(self, model_input) -> StoreStatus:
@@ -372,9 +379,27 @@ class KVEngine(DistributedKVEngineBase):
     def _storage_exists(self, file_path: str) -> bool:
         """使用存储后端检查文件是否存在"""
         return self._storage.exists(file_path)
+        
+    def _update_last_access_time(self, file_path: str):
+        """更新元数据的最后访问时间（异步）"""
+        try:
+            # 获取当前元数据
+            meta = self._meta_cache.get_metadata(key=file_path)
+            if meta:
+                # 更新最后访问时间
+                meta.last_access = int(time.time())
+                # 异步更新到缓存和ETCD
+                self._meta_cache.put_metadata(meta)
+        except Exception as e:
+            logger.error(f"更新元数据最后访问时间失败: {e}")
 
     def close(self):
         """关闭KV引擎，等待所有异步任务完成"""
+        # 关闭清理器
+        if hasattr(self, '_cleanup_manager'):
+            self._cleanup_manager.stop()
+        
+        # 等待异步任务完成
         for f in self._futures:
             try:
                 f.result(timeout=60)
