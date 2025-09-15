@@ -419,20 +419,25 @@ class KVMetadataManager:
             # 获取所有以prefix开头的键
             keys = []
             try:
-                # 使用etcd3的get_prefix方法
-                for value, meta in client.get_prefix(self.prefix):
+                # 使用get_prefix方法扫描指定前缀的所有键
+                for value, meta in client.get_prefix(self.prefix + "/"):
                     key = meta.key.decode('utf-8')
                     # 去掉prefix和开头的斜杠
                     if key.startswith(self.prefix):
                         clean_key = key[len(self.prefix):].lstrip('/')
                         if clean_key:  # 确保不是空字符串
                             keys.append(clean_key)
+                            print(f"找到元数据键: {clean_key}")
             except Exception as e:
                 print(f"Failed to scan metadata keys: {e}")
+                import traceback
+                traceback.print_exc()
             return keys
             
         try:
             return self._execute_with_failover(_scan)
         except Exception as e:
             print(f"Failed to scan metadata keys with failover: {e}")
+            import traceback
+            traceback.print_exc()
             return []
