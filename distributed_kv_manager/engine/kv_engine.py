@@ -3,6 +3,7 @@ import torch
 import logging
 import hashlib
 import time
+import struct
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
@@ -335,6 +336,27 @@ class KVEngine(DistributedKVEngineBase):
         data = self._storage.download(file_path)
         if data is None:
             return None, None, None
+            
+        # 检查数据是否包含嵌入的元数据
+        # 元数据头部是METADATA_HEADER + METADATA_VERSION
+        from distributed_kv_manager.metadata.etcd import METADATA_HEADER, METADATA_VERSION, HEADER_SIZE, METADATA_SIZE
+        header_size = HEADER_SIZE  # 8 bytes
+        min_data_size = header_size + METADATA_SIZE  # 至少需要头部和元数据大小
+        
+        # 如果数据足够长，检查是否有元数据头部
+        if len(data) >= min_data_size:
+            try:
+                # 提取头部
+                header, version = struct.unpack("<4sI", data[:header_size])
+                # 如果有元数据头部，跳过元数据部分
+                if header == METADATA_HEADER and version == METADATA_VERSION:
+                    # 跳过头部和元数据，只解包KV数据
+                    kv_data = data[header_size + METADATA_SIZE:]
+                    return self._storage.unpack_kv_data(kv_data)
+            except Exception as e:
+                logger.warning(f"Failed to extract metadata from data: {e}")
+        
+        # 如果没有元数据嵌入或提取失败，直接解包整个数据
         return self._storage.unpack_kv_data(data)
 
     def _storage_exists(self, file_path: str) -> bool:
