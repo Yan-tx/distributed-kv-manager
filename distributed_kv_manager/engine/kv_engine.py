@@ -114,6 +114,9 @@ class KVEngine(DistributedKVEngineBase):
                 continue
 
             # ------------------ 第二步：写入元数据缓存（锁定状态） ------------------ #
+            # 读取配置的过期时间，默认1天
+            expire_time = getattr(config.kv_transfer_config, "kv_expire_time", 86400)
+            
             meta = KVMetadata(
                 session_id=session_id if session_id is not None else b"session_0000",  # 使用实际的session_id或默认值
                 layer_id=layer_id if layer_id is not None else 0,                  # 使用实际的layer_id或默认值
@@ -122,6 +125,7 @@ class KVEngine(DistributedKVEngineBase):
                 file_size=0,                 # 先填0，实际大小写入完成后更新
                 create_time=int(time.time()),
                 last_access=int(time.time()),
+                expire_time=expire_time,     # 使用配置的过期时间
                 replica_locations=[b"" for _ in range(3)],
                 status=0,                     # 0表示正在写入
                 schema_version=1,
