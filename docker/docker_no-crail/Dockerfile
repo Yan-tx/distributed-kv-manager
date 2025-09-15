@@ -49,7 +49,7 @@ RUN pip install \
 
 #测试元数据时若若不用构建vLLM 可以先注释掉 
 # RUN pip install -e /root/vllm
-# COPY distributed_kv_manager/vllm_adapter/* /root/vllm/vllm/distributed/kv_transfer/kv_connector/
+# RUN cp /root/distributed_kv_manager/vllm_adapter/* /root/vllm/vllm/distributed/kv_transfer/kv_connector/
 RUN pip install transformers==4.53.2
 
 RUN pip install --upgrade pip setuptools wheel packaging
