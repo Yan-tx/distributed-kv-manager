@@ -138,6 +138,16 @@ class KVMetadata:
             
         return KVMetadata.unpack(data[HEADER_SIZE:HEADER_SIZE + 320])
 
+    def is_expired(self) -> bool:
+        """检查元数据是否已过期"""
+        # 如果expire_time为0，表示永不过期
+        if self.expire_time == 0:
+            return False
+            
+        current_time = int(time.time())
+        # 如果当前时间减去最后访问时间大于等于过期时间，则已过期
+        return (current_time - self.last_access) >= self.expire_time
+
 
 class EtcdConnectionPool:
     """ETCD连接池，管理多个etcd节点的连接"""
