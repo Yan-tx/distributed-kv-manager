@@ -66,22 +66,29 @@ class KVCleanupManager:
         logger.info("开始执行KV缓存清理")
         try:
             # 获取所有元数据键
-            # 注意：这里需要实现一个方法来获取所有键，或者扫描ETCD中的所有元数据
-            # 这是一个简化的实现，实际可能需要根据你的ETCD结构进行调整
-            cleaned_count = 0
-            
-            # 这里需要一个方法来扫描所有元数据
-            # 由于ETCD的API限制，我们可能需要分批获取
             all_keys = self._scan_all_metadata_keys()
+            logger.info(f"扫描到 {len(all_keys)} 个元数据键")
+            
+            cleaned_count = 0
+            current_time = int(time.time())
             
             for key in all_keys:
                 try:
+                    logger.debug(f"检查元数据键: {key}")
                     # 获取元数据
                     meta = self.meta_manager.get_metadata(key)
-                    if meta and meta.is_expired():
-                        # 清理过期的KV缓存
-                        self._cleanup_expired_kv(meta)
-                        cleaned_count += 1
+                    if meta:
+                        logger.debug(f"元数据详情 - 创建时间: {meta.create_time}, 最后访问: {meta.last_access}, 过期时间: {meta.expire_time}")
+                        # 检查是否过期
+                        if meta.is_expired():
+                            logger.info(f"发现过期KV缓存: {key}")
+                            # 清理过期的KV缓存
+                            self._cleanup_expired_kv(meta)
+                            cleaned_count += 1
+                        else:
+                            logger.debug(f"KV缓存未过期: {key}")
+                    else:
+                        logger.debug(f"未找到元数据: {key}")
                 except Exception as e:
                     logger.error(f"处理元数据 {key} 时发生错误: {e}")
                     
