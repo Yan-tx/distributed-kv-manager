@@ -1,11 +1,20 @@
 import struct
 import time
 import threading
+import os
+import json
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import etcd3
 from etcd3 import Etcd3Client
+
+
+# 在文件开头添加常量定义
+METADATA_HEADER = b"KVMD"
+METADATA_VERSION = 1
+HEADER_SIZE = 8  # METADATA_HEADER (4 bytes) + METADATA_VERSION (4 bytes)
+METADATA_SIZE = 320  # KVMetadata size in bytes
 
 @dataclass
 class KVMetadata:
@@ -65,6 +74,64 @@ class KVMetadata:
             ext_data_len=fields[12],
             reserved=fields[13],
         )
+        
+    def to_dict(self) -> Dict:
+        """将元数据转换为字典格式，用于存储到文件中"""
+        return {
+            "session_id": self.session_id.hex(),
+            "layer_id": self.layer_id,
+            "token_idx": self.token_idx,
+            "file_path": self.file_path,
+            "file_size": self.file_size,
+            "create_time": self.create_time,
+            "last_access": self.last_access,
+            "replica_locations": [loc.hex() for loc in self.replica_locations],
+            "status": self.status,
+            "schema_version": self.schema_version,
+            "ext_flags": self.ext_flags,
+            "ext_data": self.ext_data.hex(),
+            "ext_data_len": self.ext_data_len,
+        }
+        
+    @staticmethod
+    def from_dict(data: Dict) -> "KVMetadata":
+        """从字典格式恢复元数据"""
+        return KVMetadata(
+            session_id=bytes.fromhex(data["session_id"]),
+            layer_id=data["layer_id"],
+            token_idx=data["token_idx"],
+            file_path=data["file_path"],
+            file_size=data["file_size"],
+            create_time=data["create_time"],
+            last_access=data["last_access"],
+            replica_locations=[bytes.fromhex(loc) for loc in data["replica_locations"]],
+            status=data["status"],
+            schema_version=data["schema_version"],
+            ext_flags=data["ext_flags"],
+            ext_data=bytes.fromhex(data["ext_data"]),
+            ext_data_len=data["ext_data_len"],
+        )
+        
+    def pack_with_embedding(self) -> bytes:
+        """将元数据打包成嵌入格式，用于存储到数据文件中"""
+        header = struct.pack("<4sI", METADATA_HEADER, METADATA_VERSION)
+        metadata_bytes = self.pack()
+        return header + metadata_bytes
+        
+    @staticmethod
+    def unpack_from_file(data: bytes) -> Optional["KVMetadata"]:
+        """从文件中解包元数据"""
+        if len(data) < HEADER_SIZE:
+            return None
+            
+        header, version = struct.unpack("<4sI", data[:HEADER_SIZE])
+        if header != METADATA_HEADER or version != METADATA_VERSION:
+            return None
+            
+        if len(data) < HEADER_SIZE + 320:  # HEADER_SIZE + KVMetadata size
+            return None
+            
+        return KVMetadata.unpack(data[HEADER_SIZE:HEADER_SIZE + 320])
 
 
 class EtcdConnectionPool:

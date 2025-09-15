@@ -318,8 +318,17 @@ class KVEngine(DistributedKVEngineBase):
         return os.path.join(self.storage_dir, f"kv_{session_str}_layer_{layer_id}_{seq_hash}.pt")
     
     def _storage_insert(self, file_path: str, k_cache, v_cache, hidden, input_tokens, roi):
-        """使用存储后端打包并上传数据"""
+        """使用存储后端打包并上传数据，并嵌入元数据用于恢复"""
+        # 首先打包KV数据
         data = self._storage.pack_kv_data(k_cache, v_cache, hidden, input_tokens, roi)
+        
+        # 获取文件的元数据
+        meta = self._meta_cache.get_metadata(key=file_path)
+        if meta:
+            # 将元数据打包并嵌入到数据开头
+            metadata_bytes = meta.pack_with_embedding()
+            data = metadata_bytes + data
+            
         success = self._storage.upload(file_path, data)
         if not success:
             logger.error(f"Failed to upload KV data to {file_path}")
