@@ -429,7 +429,7 @@ class KVMetadataManager:
         扫描所有元数据键
         
         Returns:
-            所有元数据键的列表
+            所有元数据键的列表（完整键，包括前缀）
         """
         def _scan(client):
             # 获取所有以prefix开头的键
@@ -438,12 +438,10 @@ class KVMetadataManager:
                 # 使用get_prefix方法扫描指定前缀的所有键
                 for value, meta in client.get_prefix(self.prefix + "/"):
                     key = meta.key.decode('utf-8')
-                    # 去掉prefix和开头的斜杠，返回相对路径
+                    # 返回完整键
                     if key.startswith(self.prefix):
-                        clean_key = key[len(self.prefix):].lstrip('/')
-                        if clean_key:  # 确保不是空字符串
-                            keys.append(clean_key)
-                            print(f"找到元数据键: {clean_key}")
+                        keys.append(key)
+                        print(f"找到元数据键: {key}")
             except Exception as e:
                 print(f"Failed to scan metadata keys: {e}")
                 import traceback
