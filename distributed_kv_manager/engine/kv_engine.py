@@ -251,6 +251,10 @@ class KVEngine(DistributedKVEngineBase):
 
             # 元数据命中，则读取 KV
             logger.debug(f"检索序列 {seq_idx}: {file_path}")
+            
+            # 更新last_access时间实现续命（异步更新）
+            self._update_last_access_time(file_path)
+            
             key, value, hidden = self._storage_download(file_path)
             
             if key is None or value is None or hidden is None:
