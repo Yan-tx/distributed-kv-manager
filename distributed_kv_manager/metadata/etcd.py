@@ -271,6 +271,18 @@ class KVMetadataManager:
             # 多节点并行写入
             self._replicate_operation("put", key, meta)
             
+    def get_metadata_by_full_key(self, full_key: str) -> Optional[KVMetadata]:
+        """通过完整键获取元数据，自动故障转移"""
+        def _get(client):
+            print(f"尝试获取元数据，完整键: {full_key}")
+            value, _ = client.get(full_key)
+            return value
+        
+        value = self._execute_with_failover(_get)
+        if value is None:
+            return None
+        return KVMetadata.unpack(value)
+        
     def get_metadata(self, key: str) -> Optional[KVMetadata]:
         """获取元数据，自动故障转移"""
         def _get(client):
