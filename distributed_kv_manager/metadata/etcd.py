@@ -263,7 +263,9 @@ class KVMetadataManager:
         if not replicate:
             # 单节点写入
             def _put(client):
-                client.put(f"{self.prefix}/{key}", meta.pack())
+                full_key = f"{self.prefix}/{key}"
+                print(f"存储元数据，键: {full_key}")
+                client.put(full_key, meta.pack())
             self._execute_with_failover(_put)
         else:
             # 多节点并行写入
@@ -272,7 +274,9 @@ class KVMetadataManager:
     def get_metadata(self, key: str) -> Optional[KVMetadata]:
         """获取元数据，自动故障转移"""
         def _get(client):
-            value, _ = client.get(f"{self.prefix}/{key}")
+            full_key = f"{self.prefix}/{key}"
+            print(f"尝试获取元数据，键: {full_key}")
+            value, _ = client.get(full_key)
             return value
         
         value = self._execute_with_failover(_get)
