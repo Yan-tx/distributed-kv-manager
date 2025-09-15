@@ -75,8 +75,8 @@ class KVCleanupManager:
             for key in all_keys:
                 try:
                     logger.debug(f"检查元数据键: {key}")
-                    # 获取元数据
-                    meta = self.meta_manager.get_metadata(key)
+                    # 直接使用原始键获取元数据（扫描返回的已经是完整键）
+                    meta = self.meta_manager.get_metadata_by_full_key(key)
                     if meta:
                         logger.debug(f"元数据详情 - 创建时间: {meta.create_time}, 最后访问: {meta.last_access}, 过期时间: {meta.expire_time}")
                         # 检查是否过期
@@ -89,15 +89,6 @@ class KVCleanupManager:
                             logger.debug(f"KV缓存未过期: {key}")
                     else:
                         logger.warning(f"未找到元数据: {key}，可能已被删除或键格式不正确")
-                        # 尝试不同的键格式
-                        alt_key = key.lstrip('/')
-                        meta_alt = self.meta_manager.get_metadata(alt_key)
-                        if meta_alt:
-                            logger.warning(f"使用替代键找到了元数据: {alt_key}")
-                            if meta_alt.is_expired():
-                                logger.info(f"发现过期KV缓存(替代键): {alt_key}")
-                                self._cleanup_expired_kv(meta_alt)
-                                cleaned_count += 1
                 except Exception as e:
                     logger.error(f"处理元数据 {key} 时发生错误: {e}")
                     import traceback
