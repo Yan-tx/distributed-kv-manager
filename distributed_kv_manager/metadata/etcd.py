@@ -422,7 +422,7 @@ class KVMetadataManager:
                 # 使用get_prefix方法扫描指定前缀的所有键
                 for value, meta in client.get_prefix(self.prefix + "/"):
                     key = meta.key.decode('utf-8')
-                    # 去掉prefix和开头的斜杠
+                    # 去掉prefix和开头的斜杠，返回相对路径
                     if key.startswith(self.prefix):
                         clean_key = key[len(self.prefix):].lstrip('/')
                         if clean_key:  # 确保不是空字符串
