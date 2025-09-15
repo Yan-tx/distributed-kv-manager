@@ -72,7 +72,7 @@ RUN python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/si
     pip install numpy==1.24.4 sentencepiece==0.1.99 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 拷贝 vLLM 源码和 cutlass 子模块（防止编译阶段失败）
-RUN git clone -b v0,9,2 /root/vllm
+RUN git clone -b v0.9.2 /root/vllm
 # COPY cutlass /root/vllm/.deps/cutlass-src
 
 # 设置编译环境变量
@@ -95,6 +95,7 @@ RUN pip install \
 
 #测试元数据时若若不用构建vLLM 可以先注释掉 
 RUN pip install -e /root/vllm
+RUN cp /root/distributed_kv_manager/vllm_adapter/* /root/vllm/vllm/distributed/kv_transfer/kv_connector/
 RUN pip install transformers==4.53.2
 
 RUN pip install --upgrade pip setuptools wheel packaging
