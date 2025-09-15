@@ -85,9 +85,6 @@ class KVEngine(DistributedKVEngineBase):
         logger.debug(f"KV Cache 命中")
         return RetrieveStatus.HIT
 
-    def close(self):
-        print("[KV ENGINE CLOSED]")
-
     def store_kv(self, model_config, parallel_config, transfer_config,
             model_executable, model_input, kv_caches, store_status):
         """基于元数据缓存的两阶段提交写入 KV 缓存和隐藏状态（异步提交）"""
@@ -345,12 +342,14 @@ class KVEngine(DistributedKVEngineBase):
         return self._storage.exists(file_path)
 
     def close(self):
+        """关闭KV引擎，等待所有异步任务完成"""
         for f in self._futures:
             try:
                 f.result(timeout=60)
             except Exception as e:
                 logger.error(f"KV 异步存储失败: {e}")
         self._executor.shutdown(wait=True)
+        print("[KV ENGINE CLOSED]")
 
 # --- module-level engine wrapper ---
 from .base import StoreStatus, RetrieveStatus
