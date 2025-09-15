@@ -71,7 +71,10 @@ config.kv_transfer_config = SimpleNamespace(
     # SSD缓存配置
     enable_ssd_caching=False,    # 是否启用SSD缓存
     ssd_cache_dir="/tmp/ssd_cache",  # SSD缓存目录
-    enable_prefetch=True         # 是否启用预取
+    enable_prefetch=True,        # 是否启用预取
+    # KV缓存自动淘汰配置
+    kv_expire_time=86400,        # KV缓存过期时间（秒），默认1天
+    cleanup_interval=3600        # 清理间隔时间（秒），默认1小时
 )
 ```
 
