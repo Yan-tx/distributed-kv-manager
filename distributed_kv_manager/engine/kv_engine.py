@@ -128,7 +128,7 @@ class KVEngine(DistributedKVEngineBase):
 
             # ------------------ 第二步：写入元数据缓存（锁定状态） ------------------ #
             # 读取配置的过期时间，默认1天
-            expire_time = getattr(config.kv_transfer_config, "kv_expire_time", 86400)
+            expire_time = getattr(self.config.kv_transfer_config, "kv_expire_time", 86400)
             
             meta = KVMetadata(
                 session_id=session_id if session_id is not None else b"session_0000",  # 使用实际的session_id或默认值
