@@ -141,7 +141,8 @@ def test_kv_engine_basic():
                 start_pos = sum(seq_lens[:seq_idx])
                 end_pos = start_pos + seq_len
                 current_tokens = input_tokens[start_pos:end_pos]
-                file_path = engine._make_key(current_tokens)
+                # 使用正确的session_id和layer_id创建文件路径
+                file_path = engine._make_key(current_tokens, session_id=b"test_session", layer_id=0)
                 
                 print(f"检查序列 {seq_idx} 的元数据: {file_path}")
                 meta = check_etcd_metadata(config, file_path)
