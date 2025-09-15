@@ -407,3 +407,40 @@ class KVMetadataManager:
                 print(f"Successfully wrote metadata for {file_path} to etcd")
             except Exception as e:
                 print(f"Failed to write metadata for {file_path} to etcd: {e}")
+                
+    def scan_all_metadata_keys(self) -> List[str]:
+        """
+        扫描所有元数据键
+        
+        Returns:
+            所有元数据键的列表
+        """
+        def _scan(client):
+            # 获取所有以prefix开头的键
+            keys = []
+            try:
+                # 使用ETCD的range查询获取所有键
+                range_end = client._increment_prefix(self.prefix)
+                response = client._kvstub.Range(
+                    client._build_range_request(
+                        f"{self.prefix}/", 
+                        range_end=range_end
+                    )
+                )
+                
+                # 提取键名（去掉前缀）
+                for kv in response.kvs:
+                    key = kv.key.decode('utf-8')
+                    # 去掉prefix和开头的斜杠
+                    if key.startswith(self.prefix):
+                        clean_key = key[len(self.prefix):].lstrip('/')
+                        keys.append(clean_key)
+            except Exception as e:
+                print(f"Failed to scan metadata keys: {e}")
+            return keys
+            
+        try:
+            return self._execute_with_failover(_scan)
+        except Exception as e:
+            print(f"Failed to scan metadata keys with failover: {e}")
+            return []
