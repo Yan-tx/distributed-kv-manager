@@ -419,18 +419,10 @@ class KVMetadataManager:
             # 获取所有以prefix开头的键
             keys = []
             try:
-                # 使用ETCD的range查询获取所有键
-                range_end = client._increment_prefix(self.prefix)
-                response = client._kvstub.Range(
-                    client._build_range_request(
-                        f"{self.prefix}/", 
-                        range_end=range_end
-                    )
-                )
-                
-                # 提取键名（去掉前缀）
-                for kv in response.kvs:
-                    key = kv.key.decode('utf-8')
+                # 使用简单的前缀查询
+                response = client.get_prefix(self.prefix)
+                for value, meta in response:
+                    key = meta.key.decode('utf-8')
                     # 去掉prefix和开头的斜杠
                     if key.startswith(self.prefix):
                         clean_key = key[len(self.prefix):].lstrip('/')
