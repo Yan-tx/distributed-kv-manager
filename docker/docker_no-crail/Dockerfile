@@ -3,9 +3,9 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/pytorch/pytorch:2.1.2-cu
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 设置清华源并安装依赖
-RUN sed -i 's@http://.*archive.ubuntu.com@http://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
-    sed -i 's@http://.*security.ubuntu.com@http://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
+# 设置源并安装依赖
+RUN sed -i 's@http://.*archive.ubuntu.com@https://mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    sed -i 's@http://.*security.ubuntu.com@https://mirrors.aliyun.com@g' /etc/apt/sources.list && \
     apt update && \
     apt install -y \
         build-essential git wget libtool autoconf apt-utils curl \
@@ -14,8 +14,6 @@ RUN sed -i 's@http://.*archive.ubuntu.com@http://mirrors.tuna.tsinghua.edu.cn@g'
         nvme-cli sudo iproute2 pciutils libnuma-dev \
         libaio-dev libssl-dev uuid-dev kmod ninja-build cmake python3-dev \
         software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa && \
-    apt install -y cmake && \
     apt clean
 
 # 设置 JAVA 环境
