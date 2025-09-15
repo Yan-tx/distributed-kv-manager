@@ -25,18 +25,19 @@ class KVMetadata:
     file_size: int          # 8B
     create_time: int        # 8B (epoch秒)
     last_access: int        # 8B
+    expire_time: int        # 8B (过期时间，单位秒，0表示永不过期)
     replica_locations: List[bytes]  # 3 * 16B = 48B
     status: int             # 1B
     schema_version: int     # 2B
     ext_flags: int          # 4B
     ext_data: bytes         # 64B
     ext_data_len: int       # 4B
-    reserved: bytes = b"\x00" * 9  # 9B 对齐
+    reserved: bytes = b"\x00" * 1  # 1B 对齐 (调整了对齐字节以适应新字段)
 
     def pack(self) -> bytes:
         """序列化为320字节"""
         return struct.pack(
-            "<16sI16s128sQQQ48sBHI64sI9s",
+            "<16sI16s128sQQQQ48sBHI64sI1s",
             self.session_id.ljust(16, b"\x00"),
             self.layer_id,
             self.token_idx.encode("utf-8").ljust(16, b"\x00"),
@@ -44,6 +45,7 @@ class KVMetadata:
             self.file_size,
             self.create_time,
             self.last_access,
+            self.expire_time,
             b"".join(self.replica_locations).ljust(48, b"\x00"),
             self.status,
             self.schema_version,
@@ -55,7 +57,7 @@ class KVMetadata:
 
     @staticmethod
     def unpack(data: bytes) -> "KVMetadata":
-        fields = struct.unpack("<16sI16s128sQQQ48sBHI64sI9s", data)
+        fields = struct.unpack("<16sI16s128sQQQQ48sBHI64sI1s", data)
         return KVMetadata(
             session_id=fields[0].rstrip(b"\x00"),
             layer_id=fields[1],
@@ -64,15 +66,16 @@ class KVMetadata:
             file_size=fields[4],
             create_time=fields[5],
             last_access=fields[6],
+            expire_time=fields[7],
             replica_locations=[
-                fields[7][i:i+16] for i in range(0, 48, 16)
+                fields[8][i:i+16] for i in range(0, 48, 16)
             ],
-            status=fields[8],
-            schema_version=fields[9],
-            ext_flags=fields[10],
-            ext_data=fields[11].rstrip(b"\x00"),
-            ext_data_len=fields[12],
-            reserved=fields[13],
+            status=fields[9],
+            schema_version=fields[10],
+            ext_flags=fields[11],
+            ext_data=fields[12].rstrip(b"\x00"),
+            ext_data_len=fields[13],
+            reserved=fields[14],
         )
         
     def to_dict(self) -> Dict:
@@ -85,6 +88,7 @@ class KVMetadata:
             "file_size": self.file_size,
             "create_time": self.create_time,
             "last_access": self.last_access,
+            "expire_time": self.expire_time,
             "replica_locations": [loc.hex() for loc in self.replica_locations],
             "status": self.status,
             "schema_version": self.schema_version,
@@ -104,6 +108,7 @@ class KVMetadata:
             file_size=data["file_size"],
             create_time=data["create_time"],
             last_access=data["last_access"],
+            expire_time=data.get("expire_time", 0),  # 默认为0表示永不过期
             replica_locations=[bytes.fromhex(loc) for loc in data["replica_locations"]],
             status=data["status"],
             schema_version=data["schema_version"],
