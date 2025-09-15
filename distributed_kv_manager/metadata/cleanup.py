@@ -88,13 +88,26 @@ class KVCleanupManager:
                         else:
                             logger.debug(f"KV缓存未过期: {key}")
                     else:
-                        logger.debug(f"未找到元数据: {key}")
+                        logger.warning(f"未找到元数据: {key}，可能已被删除或键格式不正确")
+                        # 尝试不同的键格式
+                        alt_key = key.lstrip('/')
+                        meta_alt = self.meta_manager.get_metadata(alt_key)
+                        if meta_alt:
+                            logger.warning(f"使用替代键找到了元数据: {alt_key}")
+                            if meta_alt.is_expired():
+                                logger.info(f"发现过期KV缓存(替代键): {alt_key}")
+                                self._cleanup_expired_kv(meta_alt)
+                                cleaned_count += 1
                 except Exception as e:
                     logger.error(f"处理元数据 {key} 时发生错误: {e}")
+                    import traceback
+                    traceback.print_exc()
                     
             logger.info(f"KV缓存清理完成，共清理 {cleaned_count} 个过期项")
         except Exception as e:
             logger.error(f"执行清理操作时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
             
     def _scan_all_metadata_keys(self) -> List[str]:
         """
