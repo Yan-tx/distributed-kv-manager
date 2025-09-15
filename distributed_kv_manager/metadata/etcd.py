@@ -226,7 +226,7 @@ class KVMetadataManager:
         self.connection_pool = EtcdConnectionPool(endpoints)
         self.max_workers = max_workers
         self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
-    
+        
     def _execute_with_failover(self, operation, *args, **kwargs):
         """执行操作，如果失败则尝试故障转移"""
         last_exception = None
@@ -242,7 +242,7 @@ class KVMetadataManager:
         
         # 如果所有节点都失败，抛出异常
         raise last_exception or RuntimeError("Operation failed on all etcd nodes")
-    
+        
     def put_metadata(self, key: str, meta: KVMetadata, replicate: bool = True):
         """存储元数据，可选择是否多线程复制到所有节点"""
         if not replicate:
@@ -253,7 +253,7 @@ class KVMetadataManager:
         else:
             # 多节点并行写入
             self._replicate_operation("put", key, meta)
-    
+            
     def get_metadata(self, key: str) -> Optional[KVMetadata]:
         """获取元数据，自动故障转移"""
         def _get(client):
@@ -264,14 +264,14 @@ class KVMetadataManager:
         if value is None:
             return None
         return KVMetadata.unpack(value)
-    
+        
     def update_access_time(self, key: str, replicate: bool = True):
         """更新访问时间，可选择是否多线程复制到所有节点"""
         meta = self.get_metadata(key)
         if meta:
             meta.last_access = int(time.time())
             self.put_metadata(key, meta, replicate)
-    
+            
     def delete_metadata(self, key: str, replicate: bool = True):
         """删除元数据，可选择是否多线程复制到所有节点"""
         if not replicate:
@@ -282,7 +282,7 @@ class KVMetadataManager:
         else:
             # 多节点并行删除
             self._replicate_operation("delete", key)
-    
+            
     def _replicate_operation(self, operation: str, key: str, meta: Optional[KVMetadata] = None):
         """多线程复制操作到所有etcd节点"""
         clients = self.connection_pool.get_all_connections()
@@ -315,21 +315,21 @@ class KVMetadataManager:
             print(f"Failed to replicate operation to {len(failed_operations)} nodes:")
             for url, error in failed_operations:
                 print(f"  {url}: {error}")
-    
+                
     def _safe_put(self, client, key, value):
         try:
             client.put(key, value)
         except Exception as e:
             print(f"Failed to put {key} to {client._url}: {e}")
             raise
-    
+            
     def _safe_delete(self, client, key):
         try:
             client.delete(key)
         except Exception as e:
             print(f"Failed to delete {key} from {client._url}: {e}")
             raise
-    
+            
     def watch_metadata(self, key: str, callback):
         """订阅某个key的变更事件"""
         # 使用主节点进行watch
@@ -337,3 +337,58 @@ class KVMetadataManager:
         events_iterator, cancel = client.watch(f"{self.prefix}/{key}")
         for event in events_iterator:
             callback(event)
+            
+    def recover_metadata_from_storage(self, storage_path: str) -> Dict[str, KVMetadata]:
+        """
+        从存储中扫描并提取嵌入的元数据
+        返回: {file_path: KVMetadata}
+        """
+        recovered_metadata = {}
+        
+        # 遍历存储路径下的所有文件
+        for root, _, files in os.walk(storage_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                relative_path = os.path.relpath(file_path, storage_path)
+                
+                # 尝试从文件中提取嵌入的元数据
+                metadata = self._extract_embedded_metadata_from_file(file_path)
+                if metadata:
+                    # 更新文件路径为相对路径
+                    metadata.file_path = relative_path
+                    recovered_metadata[relative_path] = metadata
+                    
+        return recovered_metadata
+        
+    def _extract_embedded_metadata_from_file(self, file_path: str) -> Optional[KVMetadata]:
+        """
+        从文件中提取嵌入的元数据
+        """
+        try:
+            # 读取文件的前几个字节，检查是否有元数据头部
+            with open(file_path, 'rb') as f:
+                # 读取足够多的字节以包含头部和元数据
+                data = f.read(HEADER_SIZE + METADATA_SIZE)
+                
+            # 尝试解包元数据
+            metadata = KVMetadata.unpack_from_file(data)
+            if metadata:
+                return metadata
+                
+            return None
+        except Exception as e:
+            print(f"Failed to extract embedded metadata from {file_path}: {e}")
+            return None
+            
+    def write_metadata_to_etcd(self, metadata_dict: Dict[str, KVMetadata]):
+        """
+        将元数据写入etcd
+        """
+        for file_path, metadata in metadata_dict.items():
+            try:
+                # 使用文件路径作为key
+                key = file_path
+                self.put_metadata(key, metadata)
+                print(f"Successfully wrote metadata for {file_path} to etcd")
+            except Exception as e:
+                print(f"Failed to write metadata for {file_path} to etcd: {e}")
