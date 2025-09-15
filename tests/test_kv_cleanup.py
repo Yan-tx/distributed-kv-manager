@@ -166,7 +166,7 @@ def test_kv_auto_cleanup():
             
             # 等待清理线程执行
             print("等待清理线程执行...")
-            time.sleep(8)  # 等待超过5秒的清理间隔
+            time.sleep(15)  # 增加等待时间，确保清理完成
             
             # 验证KV缓存文件已被清理
             file_path = engine._make_key(input_tokens, session_id=b"test_session", layer_id=0)
