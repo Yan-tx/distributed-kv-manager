@@ -252,6 +252,13 @@ class KVEngine(DistributedKVEngineBase):
             # 元数据命中，则读取 KV
             logger.debug(f"检索序列 {seq_idx}: {file_path}")
             
+            # 检查元数据是否已过期
+            meta = self._meta_cache.get_metadata(key=file_path)
+            if meta and meta.is_expired():
+                logger.warning(f"序列 {seq_idx} 元数据已过期")
+                bypass_model_exec = False
+                continue
+            
             # 更新last_access时间实现续命（异步更新）
             self._update_last_access_time(file_path)
             
