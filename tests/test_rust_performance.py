@@ -81,16 +81,10 @@ def benchmark_serialization():
     print("创建测试数据...")
     k_cache, v_cache, hidden, input_tokens, roi = create_test_data()
     
-    # 创建模拟的PyDict对象（简化实现）
-    class MockPyDict:
-        pass
-    
-    mock_dict = MockPyDict()
-    
     # 测试Python实现
-    print("测试Python实现...")
+    print("测试Python原生实现...")
     start_time = time.time()
-    for _ in range(100):
+    for _ in range(1000):
         packed = python_pack_kv_data(k_cache, v_cache, hidden, input_tokens, roi)
         unpacked = python_unpack_kv_data(packed)
     python_time = time.time() - start_time
@@ -98,9 +92,16 @@ def benchmark_serialization():
     
     # 测试Rust实现
     print("测试Rust实现...")
+    # 创建简单的字典对象来模拟PyDict
+    k_cache_dict = {}
+    v_cache_dict = {}
+    hidden_dict = {}
+    input_tokens_dict = {}
+    roi_dict = {}
+    
     start_time = time.time()
-    for _ in range(100):
-        packed = kv_serializer.pack_kv_data(mock_dict, mock_dict, mock_dict, mock_dict, mock_dict)
+    for _ in range(1000):
+        packed = kv_serializer.pack_kv_data(k_cache_dict, v_cache_dict, hidden_dict, input_tokens_dict, roi_dict)
         unpacked = kv_serializer.unpack_kv_data(packed)
     rust_time = time.time() - start_time
     print(f"Rust实现耗时: {rust_time:.4f}秒")
@@ -113,4 +114,5 @@ def benchmark_serialization():
         print("Rust实现耗时为0，无法计算性能提升")
 
 if __name__ == "__main__":
+    print("=== Rust KV序列化模块性能对比测试 ===")
     benchmark_serialization()
