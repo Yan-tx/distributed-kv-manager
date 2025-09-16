@@ -40,15 +40,14 @@ def test_rust_module():
         import kv_serializer
         print("成功导入Rust模块")
         
-        # 创建模拟的PyDict对象（简化实现）
-        class MockPyDict:
-            pass
-        
-        mock_dict = MockPyDict()
-        
-        # 测试序列化
+        # 测试序列化 - 使用None作为可选参数
         print("测试序列化...")
-        packed = kv_serializer.pack_kv_data(mock_dict, mock_dict, mock_dict, mock_dict, mock_dict)
+        # 创建简单的字典对象来模拟PyDict
+        k_cache = {}
+        v_cache = {}
+        
+        # 测试函数调用
+        packed = kv_serializer.pack_kv_data(k_cache, v_cache, None, None, None)
         print(f"序列化成功，数据大小: {len(packed)} 字节")
         
         # 测试反序列化
@@ -80,11 +79,9 @@ def benchmark_rust_module():
     try:
         import kv_serializer
         
-        # 创建模拟的PyDict对象（简化实现）
-        class MockPyDict:
-            pass
-        
-        mock_dict = MockPyDict()
+        # 创建简单的字典对象来模拟PyDict
+        k_cache = {}
+        v_cache = {}
         
         # 性能测试
         print("开始性能测试...")
@@ -92,7 +89,7 @@ def benchmark_rust_module():
         start_time = time.time()
         
         for i in range(iterations):
-            packed = kv_serializer.pack_kv_data(mock_dict, mock_dict, mock_dict, mock_dict, mock_dict)
+            packed = kv_serializer.pack_kv_data(k_cache, v_cache, None, None, None)
             unpacked = kv_serializer.unpack_kv_data(packed)
         
         end_time = time.time()
