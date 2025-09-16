@@ -19,7 +19,20 @@ print(f"Rust模块路径: {rust_module_path}")
 
 # 检查Rust模块文件是否存在
 rust_module_file = os.path.join(rust_module_path, 'kv_serializer.dll')
-print(f"Rust模块文件是否存在: {os.path.exists(rust_module_file)}")
+rust_module_file_linux = os.path.join(rust_module_path, 'libkv_serializer.so')
+print(f"Windows Rust模块文件是否存在: {os.path.exists(rust_module_file)}")
+print(f"Linux Rust模块文件是否存在: {os.path.exists(rust_module_file_linux)}")
+
+# 如果在Linux环境下，我们需要确保so文件能被找到
+if os.path.exists(rust_module_file_linux):
+    # 在Linux环境下，可能需要将so文件链接为正确的名称
+    expected_module_file = os.path.join(rust_module_path, 'kv_serializer.so')
+    if not os.path.exists(expected_module_file):
+        try:
+            os.symlink(rust_module_file_linux, expected_module_file)
+            print(f"创建符号链接: {expected_module_file}")
+        except Exception as e:
+            print(f"创建符号链接失败: {e}")
 
 def test_rust_module():
     """测试Rust模块是否正常工作"""
@@ -50,6 +63,11 @@ def test_rust_module():
         print("sys.path 内容:")
         for path in sys.path:
             print(f"  {path}")
+        # 检查目录中的文件
+        if os.path.exists(rust_module_path):
+            print("目录中的文件:")
+            for file in os.listdir(rust_module_path):
+                print(f"  {file}")
         return False
     except Exception as e:
         print(f"测试过程中出现错误: {e}")
