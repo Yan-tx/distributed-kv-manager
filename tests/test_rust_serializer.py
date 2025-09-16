@@ -6,9 +6,20 @@ import sys
 import os
 import time
 
+# 获取项目根目录
+project_root = os.path.join(os.path.dirname(__file__), '..')
+project_root = os.path.abspath(project_root)
+
 # 将Rust模块路径添加到Python路径
-rust_module_path = os.path.join(os.path.dirname(__file__), '..', 'rust_extensions', 'kv_serializer', 'target', 'release')
+rust_module_path = os.path.join(project_root, 'rust_extensions', 'kv_serializer', 'target', 'release')
 sys.path.append(rust_module_path)
+
+print(f"项目根目录: {project_root}")
+print(f"Rust模块路径: {rust_module_path}")
+
+# 检查Rust模块文件是否存在
+rust_module_file = os.path.join(rust_module_path, 'kv_serializer.dll')
+print(f"Rust模块文件是否存在: {os.path.exists(rust_module_file)}")
 
 def test_rust_module():
     """测试Rust模块是否正常工作"""
@@ -35,9 +46,15 @@ def test_rust_module():
         return True
     except ImportError as e:
         print(f"无法导入Rust模块: {e}")
+        # 尝试列出sys.path中的内容
+        print("sys.path 内容:")
+        for path in sys.path:
+            print(f"  {path}")
         return False
     except Exception as e:
         print(f"测试过程中出现错误: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def benchmark_rust_module():
@@ -74,6 +91,8 @@ def benchmark_rust_module():
         return False
     except Exception as e:
         print(f"性能测试过程中出现错误: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 if __name__ == "__main__":
