@@ -11,6 +11,9 @@ A distributed key-value cache manager designed for efficient storage and retriev
 - **Asynchronous Operations**: Non-blocking storage operations with thread pool execution
 - **Fault Tolerance**: Automatic failover and replication for ETCD metadata
 - **Flexible Configuration**: Easy configuration of storage backends and cache policies
+- **Automatic Cleanup**: Automatic cleanup of expired KV caches based on configurable expiration time
+- **Metadata Recovery**: Ability to recover metadata from storage files
+- **Enhanced Logging**: Detailed logging for debugging and monitoring
 
 ## Architecture
 
@@ -21,6 +24,7 @@ The system consists of several key components:
 3. **Metadata Manager**: ETCD-based metadata management with connection pooling
 4. **Metadata Cache**: Three-tier caching system for improved metadata access performance
 5. **Storage Factory**: Factory pattern for creating appropriate storage backends
+6. **Cleanup Manager**: Automatic cleanup of expired KV caches
 
 ### Key Components
 
@@ -29,6 +33,7 @@ The main engine that orchestrates KV cache storage and retrieval operations. It 
 - Determining when to store or retrieve KV caches
 - Managing asynchronous storage operations
 - Coordinating with storage backends and metadata systems
+- Checking metadata expiration during retrieval operations
 
 #### Storage Backends
 Support for multiple storage backends:
@@ -41,12 +46,21 @@ Robust metadata management using ETCD with:
 - Automatic failover and replication
 - Structured metadata with fixed-size serialization
 - Watch capabilities for metadata changes
+- Metadata scanning for cleanup operations
+- Metadata recovery from storage files
 
 #### Metadata Caching
 Three-tier caching system for metadata:
 - **Pool 1**: Session-based metadata cache
 - **Pool 2**: Layer-based metadata cache
 - **Pool 3**: LRU cache for recent accesses
+
+#### Cleanup Manager
+Automatic cleanup of expired KV caches:
+- Periodic scanning of metadata for expired entries
+- Configurable cleanup interval
+- Deletion of both metadata and storage files for expired entries
+- Extension of metadata lifetime on access (touch mechanism)
 
 ## Installation
 
@@ -115,6 +129,20 @@ if retrieve_status == RetrieveStatus.HIT:
 destroy_engine()
 ```
 
+### Automatic Cleanup
+
+The KV manager automatically cleans up expired KV caches based on the configured expiration time. The cleanup process runs periodically in a background thread. You can configure the expiration time and cleanup interval in the configuration:
+
+```python
+config.kv_transfer_config = SimpleNamespace(
+    # ... other configuration options
+    kv_expire_time=86400,        # KV缓存过期时间（秒），默认1天
+    cleanup_interval=3600        # 清理间隔时间（秒），默认1小时
+)
+```
+
+Expired KV caches are automatically removed from both storage and metadata, freeing up resources without manual intervention.
+
 ### Testing
 
 Run the test suite to verify functionality:
@@ -160,7 +188,12 @@ python -m pytest
 
 # Run specific test files
 python test_kv_engine.py
+
+# Run cleanup tests
+python test_kv_cleanup.py
 ```
+
+The cleanup tests verify the automatic expiration and cleanup functionality. These tests use a shorter expiration time and cleanup interval to quickly validate the cleanup mechanism.
 
 ## Contact
 
