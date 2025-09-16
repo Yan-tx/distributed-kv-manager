@@ -16,6 +16,10 @@ RUN sed -i 's@http://.*archive.ubuntu.com@https://mirrors.aliyun.com@g' /etc/apt
         software-properties-common && \
     apt clean
 
+# 安装 Rust 工具链
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # 设置 JAVA 环境
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 ENV PATH=$JAVA_HOME/bin:$PATH
@@ -63,6 +67,9 @@ RUN mkdir -p /root/etcd && \
 RUN mkdir -p /tmp/etcd-data
 
 RUN git clone -b main https://github.com/Yan-tx/distributed-kv-manager.git /root/distributed_kv_manager
+
+# 构建 Rust 扩展模块
+RUN cd /root/distributed_kv_manager/rust_extensions/kv_serializer && cargo build --release
 RUN cp /root/distributed_kv_manager/vllm_adapter/* /root/vllm/vllm/distributed/kv_transfer/kv_connector/
 RUN pip install -e /root/distributed_kv_manager
 
