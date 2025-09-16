@@ -1,15 +1,39 @@
+#!/usr/bin/env python3
+"""
+Rust KV序列化模块性能对比测试
+"""
 import sys
 import os
 import time
-import torch
 import io
+import torch
+
+# 获取项目根目录
+project_root = os.path.join(os.path.dirname(__file__), '..')
+project_root = os.path.abspath(project_root)
 
 # 将Rust模块路径添加到Python路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'rust_extensions', 'kv_serializer', 'target', 'release'))
+rust_module_path = os.path.join(project_root, 'rust_extensions', 'kv_serializer', 'target', 'release')
+sys.path.append(rust_module_path)
+
+# 检查Rust模块文件是否存在
+rust_module_file = os.path.join(rust_module_path, 'kv_serializer.dll')
+rust_module_file_linux = os.path.join(rust_module_path, 'libkv_serializer.so')
+
+# 如果在Linux环境下，我们需要确保so文件能被找到
+if os.path.exists(rust_module_file_linux):
+    # 在Linux环境下，可能需要将so文件链接为正确的名称
+    expected_module_file = os.path.join(rust_module_path, 'kv_serializer.so')
+    if not os.path.exists(expected_module_file):
+        try:
+            os.symlink(rust_module_file_linux, expected_module_file)
+        except Exception as e:
+            pass
 
 try:
     import kv_serializer
     RUST_AVAILABLE = True
+    print("成功导入Rust模块")
 except ImportError:
     RUST_AVAILABLE = False
     print("警告: 无法导入Rust模块，将使用Python原生实现")
@@ -17,11 +41,11 @@ except ImportError:
 def python_pack_kv_data(k_cache, v_cache, hidden, input_tokens, roi):
     """Python原生实现的KV数据打包"""
     data = {
-        "k_cache": k_cache.cpu(),
-        "v_cache": v_cache.cpu(),
-        "hidden": hidden.cpu() if hidden is not None else None,
-        "input_tokens": input_tokens.cpu(),
-        "roi": roi.cpu()
+        "k_cache": k_cache.cpu() if hasattr(k_cache, 'cpu') else k_cache,
+        "v_cache": v_cache.cpu() if hasattr(v_cache, 'cpu') else v_cache,
+        "hidden": hidden.cpu() if hasattr(hidden, 'cpu') and hidden is not None else hidden,
+        "input_tokens": input_tokens.cpu() if hasattr(input_tokens, 'cpu') else input_tokens,
+        "roi": roi.cpu() if hasattr(roi, 'cpu') else roi
     }
     buffer = io.BytesIO()
     torch.save(data, buffer)
