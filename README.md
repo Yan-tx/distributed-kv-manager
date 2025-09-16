@@ -73,6 +73,24 @@ cd distributed_kv_manager
 pip install -e .
 ```
 
+### Local ETCD Setup for Development
+
+For local development and testing, you can run a minimal ETCD instance with the following commands:
+
+```bash
+# Navigate to your etcd directory
+cd ~/etcd
+
+# Start ETCD in the background
+nohup ./etcd \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  > /tmp/etcd.log 2>&1 &
+```
+
+This will start an ETCD server listening on port 2379, which is the default port expected by the KV manager.
+
 ## Configuration
 
 The system can be configured through the `kv_transfer_config` object with the following options:

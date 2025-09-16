@@ -73,6 +73,24 @@ cd distributed_kv_manager
 pip install -e .
 ```
 
+### 本地ETCD设置用于开发
+
+为了本地开发和测试，您可以使用以下命令运行一个最小化的ETCD实例：
+
+```bash
+# 导航到您的etcd目录
+cd ~/etcd
+
+# 在后台启动ETCD
+nohup ./etcd \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  > /tmp/etcd.log 2>&1 &
+```
+
+这将启动一个监听2379端口的ETCD服务器，这是KV管理器默认期望的端口。
+
 ## 配置
 
 系统可以通过`kv_transfer_config`对象进行配置，包含以下选项：
