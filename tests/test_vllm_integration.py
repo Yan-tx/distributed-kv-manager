@@ -79,7 +79,7 @@ def test_kv_storage_and_retrieval():
     print("开始测试KV存储和检索功能...")
     
     # 加载配置
-    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
     config = load_config_from_json(config_path)
     
     # 初始化引擎
