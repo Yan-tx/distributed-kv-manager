@@ -14,11 +14,16 @@ def load_config_from_json(config_path: str = None):
     """
     if config_path is None:
         # 默认使用项目根目录的config.json
-        # 获取当前文件所在目录的上两级目录（distributed_kv_manager的父目录）
+        # 获取当前文件所在目录的上一级目录（distributed_kv_manager目录）
         current_dir = os.path.dirname(__file__)
-        project_root = os.path.dirname(os.path.dirname(current_dir))
+        project_root = os.path.dirname(current_dir)
         config_path = os.path.join(project_root, 'config.json')
     
+    # 如果还是找不到配置文件，尝试使用当前工作目录
+    if not os.path.exists(config_path):
+        config_path = os.path.join(os.getcwd(), 'config.json')
+        
+    # 如果仍然找不到，抛出异常
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"配置文件 {config_path} 不存在")
     
