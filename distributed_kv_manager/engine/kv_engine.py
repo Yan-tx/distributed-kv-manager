@@ -352,10 +352,8 @@ class KVEngine(DistributedKVEngineBase):
             layer_id = 0
         # 将session_id转换为字符串
         session_str = session_id.decode('utf-8') if isinstance(session_id, bytes) else str(session_id)
-        # 构造文件名，不包含路径分隔符
-        filename = f"kv_{session_str}_layer_{layer_id}_{seq_hash}.pt"
-        # 使用os.path.join确保正确的路径分隔符，并去除可能的前导斜杠
-        return os.path.join(self.storage_dir.lstrip('/'), filename)
+        # 构造文件名，不包含路径前缀
+        return f"kv_{session_str}_layer_{layer_id}_{seq_hash}.pt"
     
     def _storage_insert(self, file_path: str, k_cache, v_cache, hidden, input_tokens, roi):
         """使用存储后端打包并上传数据，并嵌入元数据用于恢复"""
@@ -414,7 +412,11 @@ class KVEngine(DistributedKVEngineBase):
 
     def _storage_exists(self, file_path: str) -> bool:
         """使用存储后端检查文件是否存在"""
-        return self._storage.exists(file_path)
+        logger.debug(f"检查文件是否存在: {file_path}, 存储实例类型: {type(self._storage)}")
+        # 直接使用file_path，因为_storage.exists会处理路径前缀
+        exists = self._storage.exists(file_path)
+        logger.debug(f"文件 {file_path} 存在: {exists}")
+        return exists
         
     def _update_last_access_time(self, file_path: str):
         """更新元数据的最后访问时间（异步）"""
