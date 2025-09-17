@@ -39,6 +39,7 @@ class KVEngine(DistributedKVEngineBase):
 
         # 使用存储工厂创建存储实例
         self._storage: AbstractStorage = StorageFactory.create_storage(config)
+        logger.info(f"创建的存储实例类型: {type(self._storage)}")
         self.storage_dir = getattr(config.kv_transfer_config, "storage_dir", "/kvcache")
 
         # metadata
@@ -272,6 +273,10 @@ class KVEngine(DistributedKVEngineBase):
                     logger.warning(f"文件 {file_path} 不存在")
                 else:
                     logger.warning(f"文件 {file_path} 存在但可能已损坏")
+                    # 增加更多诊断信息
+                    logger.warning(f"下载的key是否为None: {key is None}")
+                    logger.warning(f"下载的value是否为None: {value is None}")
+                    logger.warning(f"下载的hidden是否为None: {hidden is None}")
                 bypass_model_exec = False
                 continue
 
