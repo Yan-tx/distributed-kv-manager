@@ -10,8 +10,8 @@ class StorageFactory:
     @staticmethod
     def create_storage(config) -> Optional[AbstractStorage]:
         """根据配置创建存储实例"""
-        storage_type = getattr(config.kv_transfer_config, "storage_type", "crail")
-        enable_caching = getattr(config.kv_transfer_config, "enable_ssd_caching", False)
+        storage_type = getattr(config.kv_transfer_config, "storage_type", "local")
+        enable_caching = getattr(config.kv_transfer_config, "enable_ssd_caching", True)
         cache_dir = getattr(config.kv_transfer_config, "ssd_cache_dir", "/tmp/ssd_cache")
         enable_prefetch = getattr(config.kv_transfer_config, "enable_prefetch", True)
         
