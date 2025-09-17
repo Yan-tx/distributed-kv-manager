@@ -98,6 +98,9 @@ class CachingStorage(AbstractStorage):
         if success:
             # 更新SSD缓存
             self.ssd_cache.put(file_path, data)
+            logger.debug(f"数据已上传并缓存: {file_path}")
+        else:
+            logger.error(f"数据上传失败: {file_path}")
         return success
     
     def download(self, file_path: str) -> Optional[bytes]:
@@ -105,19 +108,24 @@ class CachingStorage(AbstractStorage):
         # 1. 先检查SSD缓存
         data = self.ssd_cache.get(file_path)
         if data is not None:
+            logger.debug(f"缓存命中: {file_path}")
             # 启动预取
             if self.enable_prefetch:
                 self._trigger_prefetch(file_path)
             return data
             
         # 2. 从后端存储获取
+        logger.debug(f"缓存未命中，从后端存储获取: {file_path}")
         data = self.storage_backend.download(file_path)
         if data is not None:
             # 保存到SSD缓存
             self.ssd_cache.put(file_path, data)
+            logger.debug(f"数据已从后端存储获取并缓存: {file_path}")
             # 启动预取
             if self.enable_prefetch:
                 self._trigger_prefetch(file_path)
+        else:
+            logger.warning(f"无法从后端存储获取数据: {file_path}")
         return data
     
     def exists(self, file_path: str) -> bool:
