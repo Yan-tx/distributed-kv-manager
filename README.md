@@ -93,6 +93,10 @@ This will start an ETCD server listening on port 2379, which is the default port
 
 ## Configuration
 
+The system can be configured in two ways:
+
+### 1. Using Python Configuration Objects
+
 The system can be configured through the `kv_transfer_config` object with the following options:
 
 ```python
@@ -106,8 +110,43 @@ config.kv_transfer_config = SimpleNamespace(
     enable_prefetch=True,        # 是否启用预取
     # KV缓存自动淘汰配置
     kv_expire_time=86400,        # KV缓存过期时间（秒），默认1天
-    cleanup_interval=3600        # 清理间隔时间（秒），默认1小时
+    cleanup_interval=3600,       # 清理间隔时间（秒），默认1小时
+    # 存储特定配置
+    crail_dir="./crail_kvcache", # Crail存储目录
+    local_dir="./local_kvcache"  # 本地存储目录
 )
+```
+
+### 2. Using JSON Configuration File
+
+Alternatively, you can create a `config.json` file in the project root directory:
+
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "crail",
+    "storage_dir": "/kvcache",
+    "etcd_endpoints": ["127.0.0.1:2379"],
+    "enable_ssd_caching": false,
+    "ssd_cache_dir": "/tmp/ssd_cache",
+    "enable_prefetch": true,
+    "kv_expire_time": 86400,
+    "cleanup_interval": 3600,
+    "crail_dir": "./crail_kvcache",
+    "local_dir": "./local_kvcache"
+  },
+  "rank": 0,
+  "local_rank": 0
+}
+```
+
+Then initialize the engine without passing a config object:
+
+```python
+from distributed_kv_manager import init_engine
+
+# Will automatically load from config.json
+engine = init_engine()
 ```
 
 ### Storage Configuration

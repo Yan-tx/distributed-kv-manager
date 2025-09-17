@@ -93,6 +93,10 @@ nohup ./etcd \
 
 ## 配置
 
+系统可以通过两种方式进行配置：
+
+### 1. 使用Python配置对象
+
 系统可以通过`kv_transfer_config`对象进行配置，包含以下选项：
 
 ```python
@@ -106,8 +110,43 @@ config.kv_transfer_config = SimpleNamespace(
     enable_prefetch=True,        # 是否启用预取
     # KV缓存自动淘汰配置
     kv_expire_time=86400,        # KV缓存过期时间（秒），默认1天
-    cleanup_interval=3600        # 清理间隔时间（秒），默认1小时
+    cleanup_interval=3600,       # 清理间隔时间（秒），默认1小时
+    # 存储特定配置
+    crail_dir="./crail_kvcache", # Crail存储目录
+    local_dir="./local_kvcache"  # 本地存储目录
 )
+```
+
+### 2. 使用JSON配置文件
+
+或者，您可以在项目根目录创建一个`config.json`文件：
+
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "crail",
+    "storage_dir": "/kvcache",
+    "etcd_endpoints": ["127.0.0.1:2379"],
+    "enable_ssd_caching": false,
+    "ssd_cache_dir": "/tmp/ssd_cache",
+    "enable_prefetch": true,
+    "kv_expire_time": 86400,
+    "cleanup_interval": 3600,
+    "crail_dir": "./crail_kvcache",
+    "local_dir": "./local_kvcache"
+  },
+  "rank": 0,
+  "local_rank": 0
+}
+```
+
+然后在不传递配置对象的情况下初始化引擎：
+
+```python
+from distributed_kv_manager import init_engine
+
+# 将自动从config.json加载配置
+engine = init_engine()
 ```
 
 ### 存储配置
