@@ -33,6 +33,7 @@ class MockModelInput:
     """模拟vLLM的ModelInput"""
     input_tokens: torch.Tensor
     attn_metadata: MockAttentionMetadata
+    hidden_states: Optional[torch.Tensor] = None
     session_id: bytes = b"session_0000"
     layer_id: int = 0
 
@@ -41,6 +42,9 @@ def create_mock_model_input(seq_len: int = 10) -> MockModelInput:
     """创建模拟的模型输入"""
     # 创建输入tokens
     input_tokens = torch.randint(0, 1000, (seq_len,))
+    
+    # 创建隐藏状态
+    hidden_states = torch.randn(seq_len, 64)  # 形状: (seq_len, hidden_size)
     
     # 创建注意力元数据
     # 槽位映射应该是一个二维张量，形状为(num_seqs, max_seq_len)
@@ -55,7 +59,8 @@ def create_mock_model_input(seq_len: int = 10) -> MockModelInput:
     
     return MockModelInput(
         input_tokens=input_tokens,
-        attn_metadata=attn_metadata
+        attn_metadata=attn_metadata,
+        hidden_states=hidden_states
     )
 
 
