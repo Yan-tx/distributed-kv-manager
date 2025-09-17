@@ -260,16 +260,19 @@ class KVMetadataManager:
         
     def put_metadata(self, key: str, meta: KVMetadata, replicate: bool = True):
         """存储元数据，可选择是否多线程复制到所有节点"""
+        # 确保key不以/开头，避免重复的斜杠
+        clean_key = key.lstrip('/')
+        
         if not replicate:
             # 单节点写入
             def _put(client):
-                full_key = f"{self.prefix}/{key}"
+                full_key = f"{self.prefix}/{clean_key}"
                 print(f"存储元数据，键: {full_key}")
                 client.put(full_key, meta.pack())
             self._execute_with_failover(_put)
         else:
             # 多节点并行写入
-            self._replicate_operation("put", key, meta)
+            self._replicate_operation("put", clean_key, meta)
             
     def get_metadata_by_full_key(self, full_key: str) -> Optional[KVMetadata]:
         """通过完整键获取元数据，自动故障转移"""
@@ -286,7 +289,9 @@ class KVMetadataManager:
     def get_metadata(self, key: str) -> Optional[KVMetadata]:
         """获取元数据，自动故障转移"""
         def _get(client):
-            full_key = f"{self.prefix}/{key}"
+            # 确保key不以/开头，避免重复的斜杠
+            clean_key = key.lstrip('/')
+            full_key = f"{self.prefix}/{clean_key}"
             print(f"尝试获取元数据，键: {full_key}")
             value, _ = client.get(full_key)
             return value

@@ -347,7 +347,10 @@ class KVEngine(DistributedKVEngineBase):
             layer_id = 0
         # 将session_id转换为字符串
         session_str = session_id.decode('utf-8') if isinstance(session_id, bytes) else str(session_id)
-        return os.path.join(self.storage_dir, f"kv_{session_str}_layer_{layer_id}_{seq_hash}.pt")
+        # 构造文件名，不包含路径分隔符
+        filename = f"kv_{session_str}_layer_{layer_id}_{seq_hash}.pt"
+        # 使用os.path.join确保正确的路径分隔符，并去除可能的前导斜杠
+        return os.path.join(self.storage_dir.lstrip('/'), filename)
     
     def _storage_insert(self, file_path: str, k_cache, v_cache, hidden, input_tokens, roi):
         """使用存储后端打包并上传数据，并嵌入元数据用于恢复"""
