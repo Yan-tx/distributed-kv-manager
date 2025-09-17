@@ -97,6 +97,7 @@ def test_kv_storage_and_retrieval():
     model_input = create_mock_model_input(seq_len=10)
     print(f"模型输入创建完成，序列长度: {len(model_input.attn_metadata.seq_lens)}")
     print(f"槽位映射形状: {model_input.attn_metadata.slot_mapping.shape}")
+    print(f"隐藏状态形状: {model_input.hidden_states.shape if model_input.hidden_states is not None else None}")
     
     # 创建模拟KV缓存
     print("创建模拟KV缓存...")
@@ -150,6 +151,7 @@ def test_kv_storage_and_retrieval():
             )
             print(f"KV缓存检索完成")
             print(f"隐藏状态: {hidden_state}")
+            print(f"隐藏状态形状: {hidden_state.shape if hidden_state is not None else None}")
             print(f"是否跳过模型执行: {bypass_model_exec}")
         except Exception as e:
             print(f"检索KV缓存时出错: {e}")
