@@ -18,7 +18,7 @@ class DistributedKVConnector(KVConnectorBase):
         """
         engine: DistributedKVEngineBase 子类实例
         """
-        from distributed_kv_manager.storage.crail_kv_engine import(
+        from distributed_kv_manager.engine import(
             StoreStatus,RetrieveStatus,init_engine,
             retrieve_kv,should_retrieve,store_kv,should_store)
         self.rank = rank
