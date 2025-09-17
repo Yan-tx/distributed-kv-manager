@@ -91,11 +91,13 @@ def test_kv_storage_and_retrieval():
     print("创建模拟模型输入...")
     model_input = create_mock_model_input(seq_len=10)
     print(f"模型输入创建完成，序列长度: {len(model_input.attn_metadata.seq_lens)}")
+    print(f"槽位映射形状: {model_input.attn_metadata.slot_mapping.shape}")
     
     # 创建模拟KV缓存
     print("创建模拟KV缓存...")
     kv_caches = create_mock_kv_caches(num_layers=6, seq_len=10)
     print(f"KV缓存创建完成，层数: {len(kv_caches)}")
+    print(f"单个KV缓存形状: {kv_caches[0].shape}")
     
     # 检查是否应该存储
     print("检查是否应该存储KV缓存...")
