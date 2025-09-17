@@ -19,8 +19,8 @@ RUN sed -i 's@http://.*archive.ubuntu.com@http://mirrors.tuna.tsinghua.edu.cn@g'
     apt clean
 
 # 安装 Rust 工具链
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# ENV PATH="/root/.cargo/bin:${PATH}"
 
 # 设置 JAVA 环境
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
