@@ -1,8 +1,11 @@
 from typing import Optional
+import logging
 from .base import AbstractStorage
 from .crail_storage import CrailStorage
 from .local_storage import LocalStorage
 from .caching_storage import CachingStorage
+
+logger = logging.getLogger("StorageFactory")
 
 class StorageFactory:
     """存储后端工厂，根据配置创建不同的存储实例"""
