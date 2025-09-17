@@ -1,0 +1,16 @@
+{
+  "kv_transfer_config": {
+    "storage_type": "crail",
+    "storage_dir": "/kvcache",
+    "etcd_endpoints": ["127.0.0.1:2379"],
+    "enable_ssd_caching": true,
+    "ssd_cache_dir": "/tmp/ssd_cache",
+    "enable_prefetch": true,
+    "kv_expire_time": 86400,
+    "cleanup_interval": 3600,
+    "crail_dir": "./crail_kvcache",
+    "local_dir": "./local_kvcache"
+  },
+  "rank": 0,
+  "local_rank": 0
+}
