@@ -26,13 +26,17 @@ class MockModelInput:
 
 class MockConfig:
     """模拟配置对象"""
-    def __init__(self, storage_type="local", storage_dir=None):
+    def __init__(self, storage_type="local", storage_dir=None, local_dir=None, enable_caching=False, cache_dir=None):
         self.rank = 0
         self.local_rank = 0
         self.kv_transfer_config = SimpleNamespace(
             storage_type=storage_type,
             storage_dir=storage_dir or tempfile.mkdtemp(),
-            etcd_endpoints=["127.0.0.1:2379"]
+            local_dir=local_dir or storage_dir or tempfile.mkdtemp(),  # 为local存储类型设置local_dir
+            etcd_endpoints=["127.0.0.1:2379"],
+            enable_ssd_caching=enable_caching,
+            ssd_cache_dir=cache_dir or tempfile.mkdtemp(),
+            enable_prefetch=True
         )
 
 
@@ -68,8 +72,10 @@ def test_kv_engine_basic():
     """测试KV引擎的基本功能"""
     # 创建临时目录用于存储
     with tempfile.TemporaryDirectory() as temp_dir:
-        # 初始化配置和引擎
-        config = MockConfig(storage_type="local", storage_dir=temp_dir)
+        # 创建缓存目录
+        cache_dir = tempfile.mkdtemp()
+        # 初始化配置和引擎，启用缓存
+        config = MockConfig(storage_type="local", storage_dir=temp_dir, local_dir=temp_dir, enable_caching=True, cache_dir=cache_dir)
         engine = init_engine(config)
         
         try:
