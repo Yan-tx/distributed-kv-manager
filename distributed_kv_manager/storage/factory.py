@@ -14,9 +14,11 @@ class StorageFactory:
     def create_storage(config) -> Optional[AbstractStorage]:
         """根据配置创建存储实例"""
         storage_type = getattr(config.kv_transfer_config, "storage_type", "local")
-        enable_caching = getattr(config.kv_transfer_config, "enable_ssd_caching", True)
+        enable_caching = getattr(config.kv_transfer_config, "enable_ssd_caching", False)  # 默认值改为False
         cache_dir = getattr(config.kv_transfer_config, "ssd_cache_dir", "/tmp/ssd_cache")
         enable_prefetch = getattr(config.kv_transfer_config, "enable_prefetch", True)
+        
+        logger.info(f"创建存储实例: storage_type={storage_type}, enable_caching={enable_caching}, cache_dir={cache_dir}")
         
         # 创建基础存储实例
         base_storage = None
@@ -32,6 +34,8 @@ class StorageFactory:
         
         # 如果启用了缓存，则包装基础存储实例
         if enable_caching:
+            logger.info(f"启用SSD缓存，缓存目录: {cache_dir}")
             return CachingStorage(base_storage, cache_dir, enable_prefetch)
         
+        logger.info("未启用SSD缓存，直接返回基础存储实例")
         return base_storage
