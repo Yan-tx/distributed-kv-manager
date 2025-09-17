@@ -266,6 +266,12 @@ class KVEngine(DistributedKVEngineBase):
             
             if key is None or value is None or hidden is None:
                 logger.warning(f"序列 {seq_idx} 检索失败，文件可能不存在或损坏")
+                logger.warning(f"文件路径: {file_path}")
+                # 检查文件是否存在
+                if not self._storage_exists(file_path):
+                    logger.warning(f"文件 {file_path} 不存在")
+                else:
+                    logger.warning(f"文件 {file_path} 存在但可能已损坏")
                 bypass_model_exec = False
                 continue
 
@@ -361,9 +367,13 @@ class KVEngine(DistributedKVEngineBase):
 
     def _storage_download(self, file_path: str) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """使用存储后端下载并解包数据"""
+        logger.debug(f"开始下载文件: {file_path}")
         data = self._storage.download(file_path)
         if data is None:
+            logger.warning(f"下载文件 {file_path} 失败，文件可能不存在")
             return None, None, None
+            
+        logger.debug(f"成功下载文件 {file_path}，数据大小: {len(data)} 字节")
             
         # 检查数据是否包含嵌入的元数据
         # 元数据头部是METADATA_HEADER + METADATA_VERSION
@@ -376,15 +386,22 @@ class KVEngine(DistributedKVEngineBase):
             try:
                 # 提取头部
                 header, version = struct.unpack("<4sI", data[:header_size])
+                logger.debug(f"文件 {file_path} 包含元数据头部: {header}, 版本: {version}")
                 # 如果有元数据头部，跳过元数据部分
                 if header == METADATA_HEADER and version == METADATA_VERSION:
                     # 跳过头部和元数据，只解包KV数据
                     kv_data = data[header_size + METADATA_SIZE:]
+                    logger.debug(f"跳过元数据部分，KV数据大小: {len(kv_data)} 字节")
                     return self._storage.unpack_kv_data(kv_data)
+                else:
+                    logger.warning(f"文件 {file_path} 的元数据头部不匹配: {header} != {METADATA_HEADER} 或版本不匹配: {version} != {METADATA_VERSION}")
             except Exception as e:
-                logger.warning(f"Failed to extract metadata from data: {e}")
+                logger.warning(f"从文件 {file_path} 中提取元数据失败: {e}")
+        else:
+            logger.warning(f"文件 {file_path} 数据太短，无法包含元数据: {len(data)} < {min_data_size}")
         
         # 如果没有元数据嵌入或提取失败，直接解包整个数据
+        logger.debug(f"直接解包整个数据，大小: {len(data)} 字节")
         return self._storage.unpack_kv_data(data)
 
     def _storage_exists(self, file_path: str) -> bool:

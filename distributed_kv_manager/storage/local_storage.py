@@ -35,18 +35,19 @@ class LocalStorage(AbstractStorage):
         """从本地文件系统下载数据"""
         try:
             full_path = os.path.join(self.local_dir, file_path)
+            logger.debug(f"尝试下载文件: {full_path}")
             
             if not os.path.exists(full_path):
-                logger.warning(f"File not found: {full_path}")
+                logger.warning(f"文件不存在: {full_path}")
                 return None
                 
             with open(full_path, 'rb') as f:
                 data = f.read()
                 
-            logger.debug(f"Successfully downloaded data from {full_path}")
+            logger.debug(f"成功下载文件 {full_path}，数据大小: {len(data)} 字节")
             return data
         except Exception as e:
-            logger.error(f"Failed to download data from {file_path}: {e}")
+            logger.error(f"下载文件 {file_path} 失败: {e}")
             return None
 
     def exists(self, file_path: str) -> bool:
@@ -72,11 +73,13 @@ class LocalStorage(AbstractStorage):
     def unpack_kv_data(self, data: bytes) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """从字节流解包KV数据"""
         try:
+            logger.debug(f"开始解包KV数据，数据大小: {len(data)} 字节")
             buffer = io.BytesIO(data)
             loaded = torch.load(buffer, map_location="cpu")
+            logger.debug("成功解包KV数据")
             return loaded["k_cache"], loaded["v_cache"], loaded.get("hidden", None)
         except Exception as e:
-            logger.error(f"Failed to unpack KV data: {e}")
+            logger.error(f"解包KV数据失败: {e}")
             return None, None, None
     
     def delete(self, file_path: str) -> bool:
