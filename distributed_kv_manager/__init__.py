@@ -24,6 +24,11 @@ from .storage import (
     StorageFactory
 )
 
+from .config_loader import (
+    load_config_from_json,
+    merge_config_with_defaults
+)
+
 __all__ = [
     # 引擎相关
     'DistributedKVEngineBase',
@@ -46,5 +51,9 @@ __all__ = [
     'CrailStorage',
     'LocalStorage',
     'CachingStorage',
-    'StorageFactory'
+    'StorageFactory',
+    
+    # 配置相关
+    'load_config_from_json',
+    'merge_config_with_defaults'
 ]

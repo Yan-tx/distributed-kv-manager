@@ -26,11 +26,16 @@ class DistributedKVEngineBase:
     def close(self):
         raise NotImplementedError
 
+from ..config_loader import load_config_from_json
+
 _engine_instance: DistributedKVEngineBase = None
 
-def init_engine(config):
+def init_engine(config=None, config_path=None):
     global _engine_instance
     if _engine_instance is None:
+        # 如果没有提供config，则从配置文件加载
+        if config is None:
+            config = load_config_from_json(config_path)
         backend_type = getattr(config.kv_transfer_config, "backend_type", "crail")
         if backend_type == "crail":
             from .backends import CrailKVEngine

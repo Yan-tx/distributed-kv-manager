@@ -421,15 +421,23 @@ class KVEngine(DistributedKVEngineBase):
 
 # --- module-level engine wrapper ---
 from .base import StoreStatus, RetrieveStatus
+from ..config_loader import load_config_from_json
 
 _engine_singleton: KVEngine | None = None  
 
-def init_engine(config):
+def init_engine(config=None, config_path=None):
     """
-    初始化并返回 engine 单例。传入 vllm 的 config。
+    初始化并返回 engine 单例。传入 vllm 的 config 或从 config.json 读取配置。
+    
+    Args:
+        config: vllm 的配置对象
+        config_path: 配置文件路径，默认为项目根目录的config.json
     """
     global _engine_singleton
     if _engine_singleton is None:
+        # 如果没有提供config，则从配置文件加载
+        if config is None:
+            config = load_config_from_json(config_path)
         _engine_singleton = KVEngine(config)  # 创建KVEngine实例
     return _engine_singleton
 
