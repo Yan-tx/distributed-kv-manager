@@ -1,6 +1,6 @@
 {
   "kv_transfer_config": {
-    "storage_type": "crail",
+    "storage_type": "local",
     "storage_dir": "/kvcache",
     "etcd_endpoints": ["127.0.0.1:2379"],
     "enable_ssd_caching": true,
