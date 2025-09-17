@@ -43,9 +43,13 @@ def create_mock_model_input(seq_len: int = 10) -> MockModelInput:
     input_tokens = torch.randint(0, 1000, (seq_len,))
     
     # 创建注意力元数据
+    # 槽位映射应该是一个二维张量，形状为(num_seqs, max_seq_len)
+    # 对于单个序列，我们可以创建一个简单的映射
+    slot_mapping = torch.arange(seq_len).unsqueeze(0)  # 形状: (1, seq_len)
+    
     attn_metadata = MockAttentionMetadata(
         seq_lens=[seq_len],
-        slot_mapping=torch.arange(seq_len).unsqueeze(0),  # 简化的槽位映射
+        slot_mapping=slot_mapping,
         num_prefill_tokens=seq_len
     )
     
@@ -60,9 +64,11 @@ def create_mock_kv_caches(num_layers: int = 6, seq_len: int = 10, hidden_size: i
     kv_caches = []
     for _ in range(num_layers):
         # 创建key和value缓存
-        key_cache = torch.randn(1, seq_len, hidden_size)
-        value_cache = torch.randn(1, seq_len, hidden_size)
-        # 组合成vLLM期望的格式
+        # 在vLLM中，KV缓存的形状通常是(2, num_blocks, block_size, num_heads, head_size)
+        # 为了简化，我们创建一个形状为(2, seq_len, hidden_size)的张量
+        key_cache = torch.randn(seq_len, hidden_size)
+        value_cache = torch.randn(seq_len, hidden_size)
+        # 组合成vLLM期望的格式 (2, seq_len, hidden_size)
         kv_cache = torch.stack([key_cache, value_cache], dim=0)
         kv_caches.append(kv_cache)
     return kv_caches
