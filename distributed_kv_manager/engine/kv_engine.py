@@ -339,7 +339,7 @@ class KVEngine(DistributedKVEngineBase):
                 raise
 
         if bypass_model_exec and len(all_hidden_states) > 0:
-            final_hidden_state = torch.cat(all_hidden_states, dim=0)
+            final_hidden_state = torch.cat(tuple(all_hidden_states), dim=0)
             return final_hidden_state, True, model_input
         else:
             return None, False, model_input
