@@ -288,7 +288,7 @@ class KVEngine(DistributedKVEngineBase):
             # 打印检索到的KV形状信息
             logger.debug(f"检索到的KV形状 - key: {key.shape}, value: {value.shape}, hidden: {hidden.shape if hidden is not None else 'None'}")
             
-            # 关键修改：使用序列索引获取当前序列的槽位映射
+            # 使用序列索引获取当前序列的槽位映射
             current_slots = slot_mapping[seq_idx]
             logger.debug(f"当前槽位: {current_slots}, 形状: {current_slots.shape}")
 
