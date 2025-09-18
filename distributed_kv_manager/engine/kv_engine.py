@@ -173,7 +173,7 @@ class KVEngine(DistributedKVEngineBase):
                 hidden_state = hidden_state[start_pos:end_pos]
                 logger.debug(f"准备存储的hidden_state形状: {hidden_state.shape}")
             else:
-                logger.debug("准备存储的hidden_state为None")
+                logger.debug("准备存储的hidden_state为None (正常情况，若仅使用KV Cache)")
 
             # ------------------ 第四步：异步写入 KV 和更新元数据 ------------------ #
             # 使用辅助类确保变量正确捕获
