@@ -311,15 +311,24 @@ class KVEngine(DistributedKVEngineBase):
                     logger.debug(f"层 {layer_idx}: 当前槽位形状: {current_slots.shape}")
                     
                     # 检查形状是否匹配
-                    if layer_k.shape[0] != len(current_slots):
-                        logger.error(f"形状不匹配: 层 {layer_idx} 的KV缓存有 {layer_k.shape[0]} 个token, 但槽位映射有 {len(current_slots)} 个槽位")
+                    if layer_k.shape[0] != current_slots.numel():
+                        logger.error(f"形状不匹配: 层 {layer_idx} 的KV缓存有 {layer_k.shape[0]} 个token, 但槽位映射有 {current_slots.numel()} 个槽位")
                         bypass_model_exec = False
                         break
                         
-                    # 尝试赋值，如果失败会抛出异常
+                    # 如果 current_slots 是标量，需要特殊处理
+                    if current_slots.dim() == 0:
+                        current_slots = current_slots.unsqueeze(0)
+                    
+                    # 直接更新 key_cache 和 value_cache，避免使用 torch.stack 创建临时大张量
+                    # torch.stack 会创建一个新的张量，可能导致内存峰值
                     key_cache[current_slots] = layer_k
                     value_cache[current_slots] = layer_v
-                    kv_caches[layer_idx] = torch.stack([key_cache, value_cache], dim=0)
+                    # 分别更新 kv_cache 的两个部分
+                    kv_cache[0] = key_cache
+                    kv_cache[1] = value_cache
+                    # 不再使用 torch.stack，因为 kv_cache 本身已经是正确的结构
+                    # kv_caches[layer_idx] = torch.stack([key_cache, value_cache], dim=0)
                     
             except Exception as e:
                 logger.error(f"在序列 {seq_idx} 层 {layer_idx} 处理KV缓存时发生错误: {e}")
