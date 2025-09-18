@@ -230,7 +230,14 @@ class KVEngine(DistributedKVEngineBase):
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         num_layers = len(kv_caches)
 
-        all_hidden_states = []
+        num_tok = len(model_input.input_tokens)
+        num_dim = model_executable.model.embed_tokens.embedding_dim
+        dtype = model_executable.model.embed_tokens.weight.dtype
+        device = model_input.input_tokens.device
+        all_hidden_states = torch.zeros(
+            num_tok, num_dim, device=device, dtype=dtype
+        )
+
         bypass_model_exec = (retrieve_status == RetrieveStatus.HIT)
 
         logger.debug(f"开始检索KV，检索状态: {retrieve_status}, 序列数量: {len(seq_lens)}")
@@ -283,8 +290,6 @@ class KVEngine(DistributedKVEngineBase):
                 continue
 
             device = input_tokens.device
-            if hidden is not None:
-                hidden = hidden.to(device)
             key, value = key.to(device), value.to(device)
 
             # 打印检索到的KV形状信息
@@ -324,11 +329,8 @@ class KVEngine(DistributedKVEngineBase):
                 # 重新抛出异常，以便外部捕获
                 raise
 
-            all_hidden_states.append(hidden)
-
         if bypass_model_exec and all_hidden_states:
-            final_hidden_state = torch.cat(all_hidden_states, dim=0)
-            return final_hidden_state, True, model_input
+            return all_hidden_states, True, model_input
         else:
             return None, False, model_input
 
