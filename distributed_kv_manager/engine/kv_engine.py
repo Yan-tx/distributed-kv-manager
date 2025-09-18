@@ -338,8 +338,9 @@ class KVEngine(DistributedKVEngineBase):
                 # 重新抛出异常，以便外部捕获
                 raise
 
-        if bypass_model_exec and all_hidden_states:
-            return all_hidden_states, True, model_input
+        if bypass_model_exec and len(all_hidden_states) > 0:
+            final_hidden_state = torch.cat(all_hidden_states, dim=0)
+            return final_hidden_state, True, model_input
         else:
             return None, False, model_input
 
