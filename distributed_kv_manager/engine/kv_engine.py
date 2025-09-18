@@ -268,7 +268,7 @@ class KVEngine(DistributedKVEngineBase):
             
             key, value, hidden = self._storage_download(file_path)
             
-            if key is None or value is None or hidden is None:
+            if key is None or value is None :
                 logger.warning(f"序列 {seq_idx} 检索失败，文件可能不存在或损坏")
                 logger.warning(f"文件路径: {file_path}")
                 # 检查文件是否存在
@@ -279,7 +279,6 @@ class KVEngine(DistributedKVEngineBase):
                     # 增加更多诊断信息
                     logger.warning(f"下载的key是否为None: {key is None}")
                     logger.warning(f"下载的value是否为None: {value is None}")
-                    logger.warning(f"下载的hidden是否为None: {hidden is None}")
                 bypass_model_exec = False
                 continue
 
