@@ -59,6 +59,7 @@ class LocalStorage(AbstractStorage):
                     hidden: Optional[torch.Tensor], input_tokens: torch.Tensor, 
                     roi: torch.Tensor) -> bytes:
         """打包KV数据为字节流"""
+        logger.debug(f"打包KV数据: k_cache形状={k_cache.shape}, v_cache形状={v_cache.shape}, hidden形状={hidden.shape if hidden is not None else 'None'}")
         data = {
             "k_cache": k_cache.cpu(),
             "v_cache": v_cache.cpu(),
@@ -76,8 +77,11 @@ class LocalStorage(AbstractStorage):
             logger.debug(f"开始解包KV数据，数据大小: {len(data)} 字节")
             buffer = io.BytesIO(data)
             loaded = torch.load(buffer, map_location="cpu")
-            logger.debug("成功解包KV数据")
-            return loaded["k_cache"], loaded["v_cache"], loaded.get("hidden", None)
+            k_cache = loaded["k_cache"]
+            v_cache = loaded["v_cache"]
+            hidden = loaded.get("hidden", None)
+            logger.debug(f"成功解包KV数据: k_cache形状={k_cache.shape}, v_cache形状={v_cache.shape}, hidden形状={hidden.shape if hidden is not None else 'None'}")
+            return k_cache, v_cache, hidden
         except Exception as e:
             logger.error(f"解包KV数据失败: {e}")
             return None, None, None
