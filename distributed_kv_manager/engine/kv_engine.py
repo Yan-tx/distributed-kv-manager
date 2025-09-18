@@ -283,7 +283,9 @@ class KVEngine(DistributedKVEngineBase):
                 continue
 
             device = input_tokens.device
-            key, value, hidden = key.to(device), value.to(device), hidden.to(device)
+            if hidden is not None:
+                hidden = hidden.to(device)
+            key, value = key.to(device), value.to(device)
 
             # 打印检索到的KV形状信息
             logger.debug(f"检索到的KV形状 - key: {key.shape}, value: {value.shape}, hidden: {hidden.shape if hidden is not None else 'None'}")
