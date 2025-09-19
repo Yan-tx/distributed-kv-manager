@@ -71,9 +71,9 @@ def create_mock_kv_caches(num_layers: int = 6, seq_len: int = 10, hidden_size: i
         # 创建key和value缓存
         # 在vLLM中，KV缓存的形状通常是(2, num_blocks, block_size, num_heads, head_size)
         # 为了简化，我们创建一个形状为(2, seq_len, hidden_size)的张量
-        key_cache = torch.randn(seq_len, hidden_size)
-        value_cache = torch.randn(seq_len, hidden_size)
-        # 组合成vLLM期望的格式 (2, seq_len, hidden_size)
+        key_cache = torch.randn(1, seq_len, hidden_size)  # 添加批次维度
+        value_cache = torch.randn(1, seq_len, hidden_size)  # 添加批次维度
+        # 组合成vLLM期望的格式 (2, 1, seq_len, hidden_size)
         kv_cache = torch.stack([key_cache, value_cache], dim=0)
         kv_caches.append(kv_cache)
     return kv_caches

@@ -103,9 +103,9 @@ def test_kv_engine_basic():
             # 创建KV缓存
             kv_caches = []
             for _ in range(num_layers):
-                # 每个KV缓存是[2, seq_len, num_heads, head_size]
-                k_cache = torch.randn(seq_len * batch_size, num_heads, head_size)
-                v_cache = torch.randn(seq_len * batch_size, num_heads, head_size)
+                # 每个KV缓存是[2, batch_size, seq_len, num_heads, head_size]
+                k_cache = torch.randn(batch_size, seq_len, num_heads, head_size)
+                v_cache = torch.randn(batch_size, seq_len, num_heads, head_size)
                 kv_cache = torch.stack([k_cache, v_cache], dim=0)
                 kv_caches.append(kv_cache)
             
@@ -133,6 +133,12 @@ def test_kv_engine_basic():
             parallel_config = Mock()
             transfer_config = Mock()
             model_executable = Mock()
+            # 为model_executable添加必要的属性
+            model_executable.model = Mock()
+            model_executable.model.embed_tokens = Mock()
+            model_executable.model.embed_tokens.embedding_dim = hidden_size
+            model_executable.model.embed_tokens.weight = Mock()
+            model_executable.model.embed_tokens.weight.dtype = torch.float32
             
             # 测试存储KV
             store_kv(model_config, parallel_config, transfer_config,
@@ -186,9 +192,9 @@ def test_kv_engine_basic():
             # 创建新的KV缓存用于检索
             new_kv_caches = []
             for _ in range(num_layers):
-                # 初始化空的KV缓存
-                k_cache = torch.zeros(seq_len * batch_size, num_heads, head_size)
-                v_cache = torch.zeros(seq_len * batch_size, num_heads, head_size)
+                # 初始化空的KV缓存，保持正确的形状
+                k_cache = torch.zeros(batch_size, seq_len, num_heads, head_size)
+                v_cache = torch.zeros(batch_size, seq_len, num_heads, head_size)
                 kv_cache = torch.stack([k_cache, v_cache], dim=0)
                 new_kv_caches.append(kv_cache)
             # 测试检索KV之前
