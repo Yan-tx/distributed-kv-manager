@@ -506,7 +506,7 @@ def should_store(model_input):
     return engine.should_store(model_input)
 
 def store_kv(model_config, parallel_config, transfer_config,
-             model_executable, model_input, kv_caches, store_status):
+             model_executable, model_input, kv_caches, store_status, hidden_or_intermediate_states):
     """
     模块级 store_kv 接口，委托给 engine 的 store_kv。
     """
@@ -514,7 +514,7 @@ def store_kv(model_config, parallel_config, transfer_config,
     if engine is None:
         raise RuntimeError("Engine not initialized. Call init_engine(config) first.")
     return engine.store_kv(model_config, parallel_config, transfer_config,
-                           model_executable, model_input, kv_caches, store_status)
+                           model_executable, model_input, kv_caches, store_status, hidden_or_intermediate_states)
 
 def should_retrieve(model_input):
     """
