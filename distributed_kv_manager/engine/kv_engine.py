@@ -296,10 +296,37 @@ class KVEngine(DistributedKVEngineBase):
 
             device = input_tokens.device
             key, value = key.to(device), value.to(device)
+            hidden_on_device = None
+            if hidden is None:
+                logger.debug(f"序列 {seq_idx} 未恢复到 hidden_state，无法跳过模型执行")
+                bypass_model_exec = False
+            else:
+                try:
+                    hidden_on_device = hidden.to(device=device)
+                    if hidden_on_device.dtype != dtype:
+                        hidden_on_device = hidden_on_device.to(dtype=dtype)
+                    expected_hidden_len = end_pos - start_pos
+                    if hidden_on_device.shape[0] != expected_hidden_len:
+                        logger.error(
+                            f"hidden_state 长度不匹配: 期望 {expected_hidden_len}, 实际 {hidden_on_device.shape[0]}"
+                        )
+                        bypass_model_exec = False
+                        hidden_on_device = None
+                except Exception as e:
+                    logger.error(f"hidden_state 迁移失败: {e}", exc_info=True)
+                    bypass_model_exec = False
+                    hidden_on_device = None
 
             # 打印检索到的KV形状信息
-            logger.debug(f"检索到的KV形状 - key: {key.shape}, value: {value.shape}, hidden: {hidden.shape if hidden is not None else 'None'}")
-            
+            logger.debug(
+                "检索到的KV形状 - key: %s, value: %s, hidden: %s",
+                key.shape,
+                value.shape,
+                hidden_on_device.shape if hidden_on_device is not None else (
+                    hidden.shape if hidden is not None else "None"
+                ),
+            )
+
             # 使用序列索引获取当前序列的槽位映射
             current_slots = slot_mapping[seq_idx]
             logger.debug(f"当前槽位: {current_slots}, 形状: {current_slots.shape}")
@@ -343,7 +370,19 @@ class KVEngine(DistributedKVEngineBase):
                 # 重新抛出异常，以便外部捕获
                 raise
 
-        if bypass_model_exec and len(all_hidden_states) > 0:
+            if bypass_model_exec and hidden_on_device is not None:
+                all_hidden_states[start_pos:end_pos] = hidden_on_device
+                filled_hidden_tokens += hidden_on_device.shape[0]
+
+        if bypass_model_exec:
+            required_tokens = int(num_prefill_tokens) if num_prefill_tokens is not None else 0
+            if required_tokens > 0 and filled_hidden_tokens < required_tokens:
+                logger.debug("恢复的隐藏态数量不足，无法完全跳过模型执行")
+                bypass_model_exec = False
+            elif filled_hidden_tokens == 0:
+                bypass_model_exec = False
+
+        if bypass_model_exec and filled_hidden_tokens > 0:
             return all_hidden_states, True, model_input
         else:
             return None, False, model_input
