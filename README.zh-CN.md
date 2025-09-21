@@ -253,7 +253,18 @@ python test_kv_cleanup.py
 
 ## vLLM 快速启动与测试
 
-- 使用本连接器启动 vLLM 的 OpenAI 兼容服务（v0 接口）：
+- 先启动本地 ETCD（如未启动）：
+
+```bash
+cd ~/etcd
+nohup ./etcd \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  > /tmp/etcd.log 2>&1 &
+```
+
+- 然后使用本连接器启动 vLLM 的 OpenAI 兼容服务（v0 接口）：
 
 ```bash
 VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
@@ -265,17 +276,6 @@ VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
   --model /tmp/ckpt/Qwen3-0.6B --port 8100 --max-model-len 10000 \
   --gpu-memory-utilization 0.8 \
   --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
-```
-
-- 启动本地 ETCD（如未启动）：
-
-```bash
-cd ~/etcd
-nohup ./etcd \
-  --data-dir /tmp/etcd-data \
-  --listen-client-urls http://0.0.0.0:2379 \
-  --advertise-client-urls http://127.0.0.1:2379 \
-  > /tmp/etcd.log 2>&1 &
 ```
 
 - 基础请求测试：

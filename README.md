@@ -254,7 +254,18 @@ The cleanup tests verify the automatic expiration and cleanup functionality. The
 
 ## vLLM Integration (Quick Start)
 
-- Start vLLM OpenAI-compatible server with this connector (v0 API):
+- Start a local ETCD first (if not already):
+
+```bash
+cd ~/etcd
+nohup ./etcd \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  > /tmp/etcd.log 2>&1 &
+```
+
+- Then start the vLLM OpenAI-compatible server with this connector (v0 API):
 
 ```bash
 VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
@@ -266,17 +277,6 @@ VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
   --model /tmp/ckpt/Qwen3-0.6B --port 8100 --max-model-len 10000 \
   --gpu-memory-utilization 0.8 \
   --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
-```
-
-- Start a local ETCD (if not already):
-
-```bash
-cd ~/etcd
-nohup ./etcd \
-  --data-dir /tmp/etcd-data \
-  --listen-client-urls http://0.0.0.0:2379 \
-  --advertise-client-urls http://127.0.0.1:2379 \
-  > /tmp/etcd.log 2>&1 &
 ```
 
 - Simple requests to test:
