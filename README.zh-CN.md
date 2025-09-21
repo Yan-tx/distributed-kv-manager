@@ -251,6 +251,75 @@ python test_kv_cleanup.py
 
 清理测试验证自动过期和清理功能。这些测试使用较短的过期时间和清理间隔来快速验证清理机制。
 
+## vLLM 快速启动与测试
+
+- 使用本连接器启动 vLLM 的 OpenAI 兼容服务（v0 接口）：
+
+```bash
+VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+  --model /tmp/ckpt/Qwen --port 8100 --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 \
+  --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
+
+VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+  --model /tmp/ckpt/Qwen3-0.6B --port 8100 --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 \
+  --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
+```
+
+- 启动本地 ETCD（如未启动）：
+
+```bash
+cd ~/etcd
+nohup ./etcd \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  > /tmp/etcd.log 2>&1 &
+```
+
+- 基础请求测试：
+
+```bash
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "写一首关于春天的诗。"}],
+    "stream": true
+  }'
+
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [
+      {"role": "system", "content": "You are a helpful AI assistant."},
+      {"role": "user", "content": "请用中文详细解释GAN的原理。"}
+    ],
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [
+      {"role": "system", "content": "You are a helpful AI assistant."},
+      {"role": "user", "content": "请帮我写一首冬天的诗歌。"}
+    ],
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+```
+
+### 重要提醒（路径问题）
+
+- 启动 `api_server` 时，请不要在 `~` 或 `~/vllm` 等与源码包同名/冲突的目录下执行，
+  否则可能因 Python 模块搜索路径冲突（本地目录遮蔽 `vllm` 包）导致导入/启动失败。
+- 建议在独立的工作目录（例如 `/workspace`）中启动服务。
+
 ## 联系方式
 
 如有问题或需要支持，请联系维护人员。

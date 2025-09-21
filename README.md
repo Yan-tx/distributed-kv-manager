@@ -252,6 +252,76 @@ python test_kv_cleanup.py
 
 The cleanup tests verify the automatic expiration and cleanup functionality. These tests use a shorter expiration time and cleanup interval to quickly validate the cleanup mechanism.
 
+## vLLM Integration (Quick Start)
+
+- Start vLLM OpenAI-compatible server with this connector (v0 API):
+
+```bash
+VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+  --model /tmp/ckpt/Qwen --port 8100 --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 \
+  --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
+
+VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+  --model /tmp/ckpt/Qwen3-0.6B --port 8100 --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 \
+  --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
+```
+
+- Start a local ETCD (if not already):
+
+```bash
+cd ~/etcd
+nohup ./etcd \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  > /tmp/etcd.log 2>&1 &
+```
+
+- Simple requests to test:
+
+```bash
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "写一首关于春天的诗。"}],
+    "stream": true
+  }'
+
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [
+      {"role": "system", "content": "You are a helpful AI assistant."},
+      {"role": "user", "content": "请用中文详细解释GAN的原理。"}
+    ],
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [
+      {"role": "system", "content": "You are a helpful AI assistant."},
+      {"role": "user", "content": "请帮我写一首冬天的诗歌。"}
+    ],
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+```
+
+### Important note (path issue)
+
+- Do not launch the `api_server` from `~`, `~/vllm`, or any directory whose
+  name conflicts with installed packages (e.g., a folder named `vllm`). Such
+  paths can shadow the real Python package and cause import/startup failures.
+- Use an independent working directory instead (e.g., `/workspace`).
+
 ## Contact
 
 For questions or support, please contact the maintainers.

@@ -77,3 +77,73 @@ docker build -f Dockerfile.no-crail -t distributed-kv-manager:lite .
 - 检查日志输出
 - 验证配置文件是否正确
 - 确认依赖服务（如ETCD）是否正常运行
+
+## vLLM 快速启动与测试（容器内/宿主机均可）
+
+以下为使用本项目连接器启动 vLLM（v0 接口）并做简单验证的命令示例：
+
+### 启动 vLLM OpenAI 兼容服务（v0 接口）
+
+```bash
+VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+  --model /tmp/ckpt/Qwen --port 8100 --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 \
+  --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
+
+VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+  --model /tmp/ckpt/Qwen3-0.6B --port 8100 --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 \
+  --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
+```
+
+### 启动本地 ETCD（如未启动）
+
+```bash
+cd ~/etcd
+nohup ./etcd \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  > /tmp/etcd.log 2>&1 &
+```
+
+### 基础请求测试
+
+```bash
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "写一首关于春天的诗。"}],
+    "stream": true
+  }'
+
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [
+      {"role": "system", "content": "You are a helpful AI assistant."},
+      {"role": "user", "content": "请用中文详细解释GAN的原理。"}
+    ],
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+
+curl http://localhost:8100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/tmp/ckpt/Qwen3-0.6B",
+    "messages": [
+      {"role": "system", "content": "You are a helpful AI assistant."},
+      {"role": "user", "content": "请帮我写一首冬天的诗歌。"}
+    ],
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+```
+
+### 重要提醒（路径问题）
+
+- 启动上述 `api_server` 时，请不要在 `~` 或 `~/vllm` 等与源码重名/冲突的目录下执行，以免因 Python 模块搜索路径冲突（例如本地目录名覆盖 `vllm` 包）导致导入失败或启动异常。
+- 建议在独立的工作目录（如 `/workspace` 或任意非 `vllm` 命名的目录）中启动服务。
