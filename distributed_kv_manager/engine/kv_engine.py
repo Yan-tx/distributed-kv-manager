@@ -230,13 +230,14 @@ class KVEngine(DistributedKVEngineBase):
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         num_layers = len(kv_caches)
 
-        num_tok = len(model_input.input_tokens)
-        num_dim = model_executable.model.embed_tokens.embedding_dim
-        dtype = model_executable.model.embed_tokens.weight.dtype
-        device = model_input.input_tokens.device
-        all_hidden_states = torch.zeros(
-            num_tok, num_dim, device=device, dtype=dtype
-        )
+        # num_tok = len(model_input.input_tokens)
+        # num_dim = model_executable.model.embed_tokens.embedding_dim
+        # dtype = model_executable.model.embed_tokens.weight.dtype
+        # device = model_input.input_tokens.device
+        # all_hidden_states = torch.zeros(
+        #     num_tok, num_dim, device=device, dtype=dtype
+        # )
+        all_hidden_states = []
 
         bypass_model_exec = (retrieve_status == RetrieveStatus.HIT)
 
@@ -274,6 +275,8 @@ class KVEngine(DistributedKVEngineBase):
             self._update_last_access_time(file_path)
             
             key, value, hidden = self._storage_download(file_path)
+            all_hidden_states.append(hidden)
+            logger.debug(f"检索到的hidden形状: {hidden.shape if hidden is not None else 'None'}")
             
             if key is None or value is None :
                 logger.warning(f"序列 {seq_idx} 检索失败，文件可能不存在或损坏")
