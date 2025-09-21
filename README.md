@@ -315,13 +315,118 @@ curl http://localhost:8100/v1/chat/completions \
   }'
 ```
 
-### Important note (path issue)
+### Important notes (path and model)
 
 - Do not launch the `api_server` from `~`, `~/vllm`, or any directory whose
   name conflicts with installed packages (e.g., a folder named `vllm`). Such
   paths can shadow the real Python package and cause import/startup failures.
 - Use an independent working directory instead (e.g., `/workspace`).
+- Model path consistency: The `--model` path you pass when launching the
+  server must exactly match the `"model"` field in your subsequent `curl`
+  requests (e.g., both `/tmp/ckpt/Qwen3-0.6B`). A mismatch may cause
+  load/routing failures.
 
 ## Contact
 
 For questions or support, please contact the maintainers.
+
+## Implementing a Custom Storage Backend
+
+If you want to plug in your own storage (S3, OSS, NFS, etc.), implement the `AbstractStorage` interface and register it in the factory.
+
+- Contract (see `distributed_kv_manager/storage/base.py`):
+  - `upload(file_path: str, data: bytes) -> bool`
+  - `download(file_path: str) -> Optional[bytes]`
+  - `exists(file_path: str) -> bool`
+  - `pack_kv_data(k_cache, v_cache, hidden, input_tokens, roi) -> bytes`
+  - `unpack_kv_data(data: bytes) -> (k_cache, v_cache, hidden)`
+  - Optional helpers: `delete`, `list_files`, `extract_metadata_from_data`
+
+- Packing/unpacking guidance
+  - Follow `LocalStorage` as a reference. It packs CPU tensors via `torch.save` and returns CPU tensors from `unpack_kv_data`; the engine moves them to the right device later.
+  - The engine may prepend embedded metadata bytes; it strips them before calling your `unpack_kv_data`, so you typically do not need to parse metadata.
+
+- Minimal example
+
+```python
+# distributed_kv_manager/storage/my_storage.py
+import io, os, torch, logging
+from typing import Optional, Tuple
+from .base import AbstractStorage
+
+logger = logging.getLogger("MyStorage")
+
+class MyStorage(AbstractStorage):
+    def __init__(self, root_dir: str):
+        self.root_dir = root_dir
+        os.makedirs(self.root_dir, exist_ok=True)
+
+    def upload(self, file_path: str, data: bytes) -> bool:
+        try:
+            full = os.path.join(self.root_dir, file_path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as f:
+                f.write(data)
+            return True
+        except Exception as e:
+            logger.error("upload failed %s: %s", file_path, e)
+            return False
+
+    def download(self, file_path: str) -> Optional[bytes]:
+        full = os.path.join(self.root_dir, file_path)
+        if not os.path.exists(full):
+            return None
+        with open(full, "rb") as f:
+            return f.read()
+
+    def exists(self, file_path: str) -> bool:
+        return os.path.exists(os.path.join(self.root_dir, file_path))
+
+    def pack_kv_data(self, k_cache, v_cache, hidden, input_tokens, roi) -> bytes:
+        buf = io.BytesIO()
+        torch.save({
+            "k_cache": k_cache.cpu(),
+            "v_cache": v_cache.cpu(),
+            "hidden": None if hidden is None else hidden.cpu(),
+            "input_tokens": input_tokens.cpu(),
+            "roi": roi.cpu(),
+        }, buf)
+        return buf.getvalue()
+
+    def unpack_kv_data(self, data: bytes):
+        obj = torch.load(io.BytesIO(data), map_location="cpu")
+        return obj["k_cache"], obj["v_cache"], obj.get("hidden", None)
+```
+
+- Register in the factory (`distributed_kv_manager/storage/factory.py`):
+
+```python
+from .my_storage import MyStorage  # add import
+
+class StorageFactory:
+    @staticmethod
+    def create_storage(config):
+        storage_type = getattr(config.kv_transfer_config, "storage_type", "local")
+        # ...
+        if storage_type == "my_storage":
+            root = getattr(config.kv_transfer_config, "my_dir", "/tmp/kvcache_my")
+            base_storage = MyStorage(root)
+        # wrap with SSD cache if enable_ssd_caching=True
+```
+
+- Configure it (JSON or Python):
+
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "my_storage",
+    "my_dir": "/data/kvcache",
+    "enable_ssd_caching": false
+  }
+}
+```
+
+Tips
+- Ensure `file_path` is a relative key (factory/backends handle the base dir).
+- Keep `pack/unpack` stable across versions; shapes and dtypes must round-trip.
+- If you enable the SSD wrapper, the same `file_path` must work for upload/download/exists.

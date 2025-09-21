@@ -314,12 +314,115 @@ curl http://localhost:8100/v1/chat/completions \
   }'
 ```
 
-### 重要提醒（路径问题）
+### 重要提醒（路径与模型）
 
 - 启动 `api_server` 时，请不要在 `~` 或 `~/vllm` 等与源码包同名/冲突的目录下执行，
   否则可能因 Python 模块搜索路径冲突（本地目录遮蔽 `vllm` 包）导致导入/启动失败。
 - 建议在独立的工作目录（例如 `/workspace`）中启动服务。
+- 模型路径一致性：启动 vLLM 时使用的 `--model` 路径必须与后续 `curl` 请求体中的 `"model"` 字段完全一致
+  （例如都为 `/tmp/ckpt/Qwen3-0.6B`）。不一致可能导致加载/路由失败。
 
 ## 联系方式
 
 如有问题或需要支持，请联系维护人员。
+
+## 自定义存储后端实现
+
+如果你希望接入自定义存储（S3/OSS/NFS/自研分布式存储等），可实现 `AbstractStorage` 并在工厂中注册。
+
+- 接口约定（见 `distributed_kv_manager/storage/base.py`）：
+  - `upload(file_path: str, data: bytes) -> bool`
+  - `download(file_path: str) -> Optional[bytes]`
+  - `exists(file_path: str) -> bool`
+  - `pack_kv_data(k_cache, v_cache, hidden, input_tokens, roi) -> bytes`
+  - `unpack_kv_data(data: bytes) -> (k_cache, v_cache, hidden)`
+  - 可选：`delete`、`list_files`、`extract_metadata_from_data`
+
+- 打包/解包建议
+  - 可参考 `LocalStorage`：用 `torch.save` 将 CPU 张量写入字节流；`unpack_kv_data` 返回 CPU 张量，设备迁移由引擎负责。
+  - 引擎可能会在写入前嵌入元数据（头部+定长结构），读取时会先剥离再调用你的 `unpack_kv_data`，通常无需自行解析元数据。
+
+- 最小示例
+
+```python
+# distributed_kv_manager/storage/my_storage.py
+import io, os, torch, logging
+from typing import Optional, Tuple
+from .base import AbstractStorage
+
+logger = logging.getLogger("MyStorage")
+
+class MyStorage(AbstractStorage):
+    def __init__(self, root_dir: str):
+        self.root_dir = root_dir
+        os.makedirs(self.root_dir, exist_ok=True)
+
+    def upload(self, file_path: str, data: bytes) -> bool:
+        try:
+            full = os.path.join(self.root_dir, file_path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as f:
+                f.write(data)
+            return True
+        except Exception as e:
+            logger.error("upload failed %s: %s", file_path, e)
+            return False
+
+    def download(self, file_path: str) -> Optional[bytes]:
+        full = os.path.join(self.root_dir, file_path)
+        if not os.path.exists(full):
+            return None
+        with open(full, "rb") as f:
+            return f.read()
+
+    def exists(self, file_path: str) -> bool:
+        return os.path.exists(os.path.join(self.root_dir, file_path))
+
+    def pack_kv_data(self, k_cache, v_cache, hidden, input_tokens, roi) -> bytes:
+        buf = io.BytesIO()
+        torch.save({
+            "k_cache": k_cache.cpu(),
+            "v_cache": v_cache.cpu(),
+            "hidden": None if hidden is None else hidden.cpu(),
+            "input_tokens": input_tokens.cpu(),
+            "roi": roi.cpu(),
+        }, buf)
+        return buf.getvalue()
+
+    def unpack_kv_data(self, data: bytes):
+        obj = torch.load(io.BytesIO(data), map_location="cpu")
+        return obj["k_cache"], obj["v_cache"], obj.get("hidden", None)
+```
+
+- 在工厂中注册（`distributed_kv_manager/storage/factory.py`）：
+
+```python
+from .my_storage import MyStorage  # 新增导入
+
+class StorageFactory:
+    @staticmethod
+    def create_storage(config):
+        storage_type = getattr(config.kv_transfer_config, "storage_type", "local")
+        # ...
+        if storage_type == "my_storage":
+            root = getattr(config.kv_transfer_config, "my_dir", "/tmp/kvcache_my")
+            base_storage = MyStorage(root)
+        # 如需 SSD 包裹，在 enable_ssd_caching=True 时会被 CachingStorage 包裹
+```
+
+- 配置示例（JSON 或 Python 均可）：
+
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "my_storage",
+    "my_dir": "/data/kvcache",
+    "enable_ssd_caching": false
+  }
+}
+```
+
+Tips
+- 确保 `file_path` 为相对键（基目录由后端/工厂拼接）。
+- 保证 `pack/unpack` 的兼容性：形状与 dtype 必须能无损还原。
+- 启用 SSD 包裹时，`upload/download/exists` 要保持对同一 `file_path` 的一致语义。
