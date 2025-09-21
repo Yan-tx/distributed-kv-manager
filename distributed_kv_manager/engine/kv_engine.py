@@ -152,15 +152,17 @@ class KVEngine(DistributedKVEngineBase):
 
             # ------------------ 第三步：准备 KV 数据 ------------------ #
             all_keys, all_values = [], []
+            # 当前序列对应的槽位映射区间
+            current_slots = slot_mapping[seq_idx]
+            if current_slots.dim() > 1:
+                current_slots = current_slots.reshape(-1)
+            current_slots = current_slots[start_pos:end_pos].contiguous()
+
             for layer_idx in range(num_layers):
                 kv_cache = kv_caches[layer_idx]
                 key_cache, value_cache = self.split_kv_cache(kv_cache)
-                
-                # 关键修改：确保只存储当前序列的KV缓存
-                # 使用序列索引获取当前序列的槽位映射
-                current_slots = slot_mapping[seq_idx].flatten()
-                
-                # 确保只选择当前序列的KV缓存
+
+                # 仅存储当前序列对应的 KV
                 all_keys.append(key_cache[current_slots].unsqueeze(0))
                 all_values.append(value_cache[current_slots].unsqueeze(0))
 
@@ -170,7 +172,7 @@ class KVEngine(DistributedKVEngineBase):
             roi = torch.ones_like(current_tokens, dtype=torch.bool)
             hidden_state = hidden_or_intermediate_states
             if hidden_state is not None:
-                # hidden_state = hidden_state[start_pos:end_pos]
+                hidden_state = hidden_state[start_pos:end_pos].contiguous()
                 logger.debug(f"准备存储的hidden_state形状: {hidden_state.shape}")
             else:
                 logger.debug("准备存储的hidden_state为None (正常情况，若仅使用KV Cache)")
@@ -329,6 +331,9 @@ class KVEngine(DistributedKVEngineBase):
 
             # 使用序列索引获取当前序列的槽位映射
             current_slots = slot_mapping[seq_idx]
+            if current_slots.dim() > 1:
+                current_slots = current_slots.reshape(-1)
+            current_slots = current_slots[start_pos:end_pos].contiguous()
             logger.debug(f"当前槽位: {current_slots}, 形状: {current_slots.shape}")
 
             try:
