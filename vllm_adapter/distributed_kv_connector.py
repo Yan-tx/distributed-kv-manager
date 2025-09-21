@@ -67,7 +67,8 @@ class DistributedKVConnector(KVConnectorBase):
             model_executable,
             model_input,
             kv_caches,
-            store_status
+            store_status,
+            hidden_or_intermediate_states
         )
 
     def close(self):

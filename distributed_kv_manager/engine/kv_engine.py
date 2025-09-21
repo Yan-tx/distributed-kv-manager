@@ -6,7 +6,7 @@ import time
 import struct
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from .base import DistributedKVEngineBase, StoreStatus, RetrieveStatus
 from distributed_kv_manager.metadata.etcd import KVMetadataManager, KVMetadata
 from distributed_kv_manager.metadata.metadata_cache import MetadataCache
@@ -101,7 +101,7 @@ class KVEngine(DistributedKVEngineBase):
         return RetrieveStatus.HIT
 
     def store_kv(self, model_config, parallel_config, transfer_config,
-            model_executable, model_input, kv_caches, store_status):
+            model_executable, model_input, kv_caches, store_status, hidden_or_intermediate_states):
         """基于元数据缓存的两阶段提交写入 KV 缓存和隐藏状态（异步提交）"""
         input_tokens = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
@@ -168,9 +168,9 @@ class KVEngine(DistributedKVEngineBase):
             all_values = torch.cat(all_values, dim=0) if all_values else torch.tensor([])
             
             roi = torch.ones_like(current_tokens, dtype=torch.bool)
-            hidden_state = getattr(model_input, "hidden_states", None)
+            hidden_state = hidden_or_intermediate_states
             if hidden_state is not None:
-                hidden_state = hidden_state[start_pos:end_pos]
+                # hidden_state = hidden_state[start_pos:end_pos]
                 logger.debug(f"准备存储的hidden_state形状: {hidden_state.shape}")
             else:
                 logger.debug("准备存储的hidden_state为None (正常情况，若仅使用KV Cache)")
