@@ -418,8 +418,10 @@ class KVEngine(DistributedKVEngineBase):
                 bypass_model_exec = False
 
         if bypass_model_exec and filled_hidden_tokens > 0:
+            logger.debug(f"成功跳过模型执行，恢复的隐藏态数量: {filled_hidden_tokens}")
             return all_hidden_states, True, model_input
         else:
+            logger.debug("无法跳过模型执行，返回None进行前向传播")
             return None, False, model_input
 
     # ------------------ Helper: KV 结构 ------------------ #
