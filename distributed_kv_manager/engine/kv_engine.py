@@ -152,11 +152,24 @@ class KVEngine(DistributedKVEngineBase):
 
             # ------------------ 第三步：准备 KV 数据 ------------------ #
             all_keys, all_values = [], []
-            # 当前序列对应的槽位映射区间
+            # 当前序列对应的槽位映射
             current_slots = slot_mapping[seq_idx]
             if current_slots.dim() > 1:
                 current_slots = current_slots.reshape(-1)
-            current_slots = current_slots[start_pos:end_pos].contiguous()
+            if current_slots.dim() == 0:
+                current_slots = current_slots.unsqueeze(0)
+            if current_slots.numel() != seq_len:
+                logger.warning(
+                    "序列 %s 的槽位映射长度(%d)与序列长度(%d)不一致，使用最小长度", 
+                    file_path,
+                    current_slots.numel(),
+                    seq_len,
+                )
+                limit = min(current_slots.numel(), seq_len)
+                current_slots = current_slots[:limit]
+                current_tokens = current_tokens[:limit]
+                end_pos = start_pos + limit
+                seq_len = limit
 
             for layer_idx in range(num_layers):
                 kv_cache = kv_caches[layer_idx]
@@ -333,7 +346,24 @@ class KVEngine(DistributedKVEngineBase):
             current_slots = slot_mapping[seq_idx]
             if current_slots.dim() > 1:
                 current_slots = current_slots.reshape(-1)
-            current_slots = current_slots[start_pos:end_pos].contiguous()
+            if current_slots.dim() == 0:
+                current_slots = current_slots.unsqueeze(0)
+            if current_slots.numel() != seq_len:
+                logger.warning(
+                    "序列 %s 的槽位映射长度(%d)与序列长度(%d)不一致，无法完全命中",
+                    file_path,
+                    current_slots.numel(),
+                    seq_len,
+                )
+                limit = min(current_slots.numel(), seq_len)
+                current_slots = current_slots[:limit]
+                end_pos = start_pos + limit
+                if hidden_on_device is not None:
+                    hidden_on_device = hidden_on_device[:limit]
+                seq_len = limit
+                if limit == 0:
+                    bypass_model_exec = False
+                    continue
             logger.debug(f"当前槽位: {current_slots}, 形状: {current_slots.shape}")
 
             try:
