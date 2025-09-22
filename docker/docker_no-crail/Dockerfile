@@ -69,7 +69,8 @@ RUN mkdir -p /tmp/etcd-data
 RUN git clone -b main https://github.com/Yan-tx/distributed-kv-manager.git /root/distributed_kv_manager
 
 # 构建 Rust 扩展模块
-RUN cd /root/distributed_kv_manager/rust_extensions/kv_serializer && cargo build --release
+# RUN cd /root/distributed_kv_manager/rust_extensions/kv_serializer && cargo build --release
+
 RUN cp /root/distributed_kv_manager/vllm_adapter/* /root/vllm/vllm/distributed/kv_transfer/kv_connector/
 RUN pip install -e /root/distributed_kv_manager
 
