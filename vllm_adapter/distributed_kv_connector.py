@@ -19,8 +19,9 @@ class DistributedKVConnector(KVConnectorBase):
         engine: DistributedKVEngineBase 子类实例
         """
         from distributed_kv_manager.engine import(
-            StoreStatus,RetrieveStatus,init_engine,
-            retrieve_kv,should_retrieve,store_kv,should_store)
+            StoreStatus, RetrieveStatus, init_engine,
+            retrieve_kv, should_retrieve, store_kv, should_store,
+            destroy_engine)
         self.rank = rank
         self.local_rank = local_rank
         self.config = config
@@ -31,6 +32,7 @@ class DistributedKVConnector(KVConnectorBase):
         self.should_retrieve = should_retrieve
         self.store_kv = store_kv
         self.should_store = should_store
+        self._destroy_engine = destroy_engine
         self.store_status = StoreStatus
         self.retrieve_status = RetrieveStatus
         self.engine_name = getattr(config, "engine_id", "unknown_engine")
@@ -72,5 +74,6 @@ class DistributedKVConnector(KVConnectorBase):
         )
 
     def close(self):
-        self.engine.destroy_engine(self.engine_name)
+        # 使用模块函数销毁全局引擎单例
+        self._destroy_engine()
         logger.info(f"DistributedKVConnector engine {self.engine_name} destroyed")
