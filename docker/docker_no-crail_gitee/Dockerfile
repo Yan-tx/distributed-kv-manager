@@ -50,7 +50,7 @@ RUN pip install \
         -i https://pypi.tuna.tsinghua.edu.cn/simple 
 
 #测试元数据时若若不用构建vLLM 可以先注释掉 
-RUN pip install -e /root/vllm
+# RUN pip install -e /root/vllm
 RUN pip install transformers==4.53.2
 
 RUN pip install --upgrade pip setuptools wheel packaging
@@ -64,16 +64,24 @@ RUN pip install "protobuf>=3.19.0,<3.21" \
 #     wget -q https://github.com/etcd-io/etcd/releases/download/v3.6.4/etcd-v3.6.4-linux-amd64.tar.gz   && \
 #     tar -xzf etcd-v3.6.4-linux-amd64.tar.gz --strip-components=1 && \
 #     rm etcd-v3.6.4-linux-amd64.tar.gz
-RUN git clone https://gitee.com/mirrors/etcd.git /root/etcd_src
-# 使用 Gitee 镜像构建 etcd 源码，版本与注释的 release 一致（v3.6.4）
-ENV GOPROXY=https://goproxy.cn,direct
-RUN set -eux; \
-    cd /root/etcd_src; \
-    git checkout v3.6.4; \
-    make build; \
-    mkdir -p /root/etcd; \
-    cp -f bin/etcd bin/etcdctl /root/etcd/; \
-    true
+
+
+
+# RUN git clone https://gitee.com/mirrors/etcd.git /root/etcd_src
+# # 使用 Gitee 镜像构建 etcd 源码，版本与注释的 release 一致（v3.6.4）
+# ENV GOPROXY=https://goproxy.cn,direct
+# RUN set -eux; \
+#     cd /root/etcd_src; \
+#     git checkout v3.6.4; \
+#     make build; \
+#     mkdir -p /root/etcd; \
+#     cp -f bin/etcd bin/etcdctl /root/etcd/; \
+#     true
+RUN mkdir -p /root/etcd && \
+    cd /root/etcd && \
+    wget -q https://github.com/etcd-io/etcd/releases/download/v3.6.4/etcd-v3.6.4-linux-amd64.tar.gz   && \
+    tar -xzf etcd-v3.6.4-linux-amd64.tar.gz --strip-components=1 && \
+    rm etcd-v3.6.4-linux-amd64.tar.gz
 RUN mkdir -p /tmp/etcd-data
 
 RUN git clone -b main https://gitee.com/Yao9ling/distributed-kv-manager.git /root/distributed_kv_manager
