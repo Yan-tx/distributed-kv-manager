@@ -2,6 +2,19 @@ import json
 import os
 from types import SimpleNamespace
 
+
+def dict_to_namespace(d):
+    """Recursively convert dictionaries to SimpleNamespace.
+
+    Lists are preserved, and any dicts inside lists are also converted.
+    """
+    if isinstance(d, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [dict_to_namespace(item) for item in d]
+    else:
+        return d
+
 def load_config_from_json(config_path: str = None):
     """
     从JSON配置文件加载配置
@@ -29,16 +42,8 @@ def load_config_from_json(config_path: str = None):
     
     with open(config_path, 'r', encoding='utf-8') as f:
         config_dict = json.load(f)
-    
+
     # 将字典转换为SimpleNamespace对象，支持点号访问
-    def dict_to_namespace(d):
-        if isinstance(d, dict):
-            return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-        elif isinstance(d, list):
-            return [dict_to_namespace(item) for item in d]
-        else:
-            return d
-    
     return dict_to_namespace(config_dict)
 
 def merge_config_with_defaults(config, defaults):
