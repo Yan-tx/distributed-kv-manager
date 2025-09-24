@@ -7,6 +7,7 @@ import struct
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple, Union
+from types import SimpleNamespace
 from .base import DistributedKVEngineBase, StoreStatus, RetrieveStatus
 from distributed_kv_manager.metadata.etcd import KVMetadataManager, KVMetadata
 from distributed_kv_manager.metadata.metadata_cache import MetadataCache
@@ -561,6 +562,33 @@ def init_engine(config=None, config_path=None):
         # 如果没有提供config，则从配置文件加载
         if config is None:
             config = load_config_from_json(config_path)
+        else:
+            # 尝试加载config.json，并与传入的config合并，使JSON生效
+            json_cfg = None
+            try:
+                # 优先使用显式提供的config_path，否则使用默认查找
+                json_cfg = load_config_from_json(config_path)
+            except FileNotFoundError:
+                # 若找不到则保持传入的config
+                json_cfg = None
+
+            if json_cfg is not None:
+                combined = SimpleNamespace()
+                # 优先使用传入config的rank/local_rank，其次使用JSON，最后默认0
+                combined.rank = getattr(config, "rank", getattr(json_cfg, "rank", 0))
+                combined.local_rank = getattr(config, "local_rank", getattr(json_cfg, "local_rank", 0))
+                # 引擎标识（如存在）
+                if hasattr(config, "engine_id"):
+                    combined.engine_id = getattr(config, "engine_id")
+                elif hasattr(json_cfg, "engine_id"):
+                    combined.engine_id = getattr(json_cfg, "engine_id")
+                # 使用JSON中的kv_transfer_config覆盖，以确保config.json生效
+                combined.kv_transfer_config = getattr(
+                    json_cfg, "kv_transfer_config",
+                    getattr(config, "kv_transfer_config", SimpleNamespace())
+                )
+                config = combined
+
         _engine_singleton = KVEngine(config)  # 创建KVEngine实例
     return _engine_singleton
 
