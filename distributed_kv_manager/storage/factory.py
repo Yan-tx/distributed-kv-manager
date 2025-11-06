@@ -6,6 +6,7 @@ from .crail_storage import CrailStorage
 from .local_storage import LocalStorage
 from .caching_storage import CachingStorage
 from .composite_storage import CompositeStorage
+from .path_mapper import HashBucketPathMapper, MappedStorage
 
 logger = logging.getLogger("StorageFactory")
 
@@ -52,13 +53,20 @@ class StorageFactory:
         
         # 创建基础存储实例
         base_storage = None
+        layout = getattr(getattr(config, "kv_transfer_config", object()), "directory_layout", "flat")
+        mapper_enabled = str(layout).lower() in ("hash2", "hash_bucket", "hash")
+        mapper = HashBucketPathMapper(enable=mapper_enabled)
         if storage_type == "crail":
             crail_dir = getattr(config.kv_transfer_config, "crail_dir", "/crail/kvcache")
             base_storage = CrailStorage(crail_dir)
+            if mapper_enabled:
+                base_storage = MappedStorage(base_storage, mapper)
         elif storage_type == "local":
             # 本地文件系统存储
             local_dir = getattr(config.kv_transfer_config, "local_dir", "/tmp/kvcache")
             base_storage = LocalStorage(local_dir)
+            if mapper_enabled:
+                base_storage = MappedStorage(base_storage, mapper)
         elif storage_type == "composite":
             # 复合后端：本地 + 远端
             local_dir = getattr(config.kv_transfer_config, "local_dir", "/tmp/kvcache")
@@ -112,6 +120,12 @@ class StorageFactory:
                 else:
                     # 未指定或未知类型，使用占位远端
                     remote_backend = _NoopRemoteStorage()
+
+            # 目录映射：按需包裹本地与远端后端
+            if mapper_enabled and not isinstance(local_backend, _NoopRemoteStorage):
+                local_backend = MappedStorage(local_backend, mapper)
+            if mapper_enabled and not isinstance(remote_backend, _NoopRemoteStorage):
+                remote_backend = MappedStorage(remote_backend, mapper)
 
             # 如果远端为占位且未指定前段层数，强制全部前段落本地，避免读取空后段
             if isinstance(remote_backend, _NoopRemoteStorage) and front_n is None:

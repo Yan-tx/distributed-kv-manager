@@ -2,6 +2,7 @@ import time
 import threading
 import logging
 from typing import List, Optional
+import re
 from .etcd import KVMetadataManager, KVMetadata
 
 logger = logging.getLogger("KVCleanup")
@@ -118,21 +119,58 @@ class KVCleanupManager:
             meta: 过期的元数据
         """
         try:
-            # 1. 删除存储中的KV数据文件
+            # 1. 删除存储中的KV数据文件（仅当无其他引用）
             if self.storage:
                 try:
-                    success = self.storage.delete(meta.file_path)
-                    if success:
-                        logger.debug(f"已从存储中删除过期KV数据文件: {meta.file_path}")
+                    if not self._has_other_references(meta):
+                        success = self.storage.delete(meta.file_path)
+                        if success:
+                            logger.debug(f"已从存储中删除过期KV数据文件: {meta.file_path}")
+                        else:
+                            logger.warning(f"未能从存储中删除过期KV数据文件: {meta.file_path}")
                     else:
-                        logger.warning(f"未能从存储中删除过期KV数据文件: {meta.file_path}")
+                        logger.info(f"跳过物理删除（仍有其他引用同一内容）：{meta.file_path}")
                 except Exception as e:
                     logger.error(f"删除存储中的KV数据文件 {meta.file_path} 时发生错误: {e}")
-            
+
             # 2. 从ETCD删除元数据
             self.meta_manager.delete_metadata(meta.file_path)
-            
+
             # 3. 记录日志
             logger.info(f"已清理过期KV缓存: {meta.file_path}")
         except Exception as e:
             logger.error(f"清理过期KV缓存 {meta.file_path} 时发生错误: {e}")
+
+    # ---- helpers ----
+    _HEX_RE = re.compile(r"([0-9a-fA-F]{16,})")
+
+    def _extract_hash(self, key: str) -> Optional[str]:
+        m = list(self._HEX_RE.finditer(key))
+        if not m:
+            return None
+        return m[-1].group(1).lower()
+
+    def _has_other_references(self, meta: KVMetadata) -> bool:
+        """Return True if another non-expired metadata key references same hash.
+
+        Heuristic via filename parsing; keeps cleanup self-contained without
+        changing storage APIs.
+        """
+        try:
+            target_hash = self._extract_hash(meta.file_path)
+            if not target_hash:
+                return False
+            keys = self.meta_manager.scan_all_metadata_keys()
+            for k in keys:
+                if k == meta.file_path:
+                    continue
+                h = self._extract_hash(k)
+                if h != target_hash:
+                    continue
+                other = self.meta_manager.get_metadata_by_full_key(k)
+                if other and not other.is_expired():
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"hash 引用检查失败，保守处理为无其他引用: {e}")
+            return False

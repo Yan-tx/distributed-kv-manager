@@ -70,11 +70,11 @@ class CompositeStorage(AbstractStorage):
 
         # 如果 split=0 或 =num_layers，则不切分，分别落在远端或本地
         if split_n <= 0:
-            # 全量后段：远端
-            return self.remote_tier.upload(file_path + ".back", payload)
+            # 全量后段：远端（包含拆分标记）
+            return self.remote_tier.upload(f"{file_path}.L{split_n}.back", payload)
         if split_n >= num_layers:
-            # 全量前段：本地
-            return self.local_tier.upload(file_path + ".front", payload)
+            # 全量前段：本地（包含拆分标记）
+            return self.local_tier.upload(f"{file_path}.L{split_n}.front", payload)
 
         # 构建前后段 payload
         def build_part(k_part, v_part):
@@ -95,14 +95,19 @@ class CompositeStorage(AbstractStorage):
         torch.save(front, buf_front)
         torch.save(back, buf_back)
 
-        ok1 = self.local_tier.upload(file_path + ".front", buf_front.getvalue())
-        ok2 = self.remote_tier.upload(file_path + ".back", buf_back.getvalue())
-        return ok1 and ok2
+        ok1 = self.local_tier.upload(f"{file_path}.L{split_n}.front", buf_front.getvalue())
+        ok2 = self.remote_tier.upload(f"{file_path}.L{split_n}.back", buf_back.getvalue())
+        return bool(ok1 and ok2)
 
     def download(self, file_path: str) -> Optional[bytes]:
-        # 优先尝试读两段；允许其中一段缺失
-        front = self.local_tier.download(file_path + ".front")
-        back = self.remote_tier.download(file_path + ".back")
+        # 依据当前配置计算拆分标记，优先尝试对应 .L{split} 版本；允许其中一段缺失
+        # 如果对应版本缺失，不做跨 split 回退（保持简单确定性）。
+        # 计算伪 split 用于命名（若无法知道层数，这里用配置推测：front_n 或 ratio*假定值）
+        # 由于读取阶段无法获知 num_layers，这里直接用配置的 layer_split_front 值；
+        # 若为 None，则用 ratio 映射到一个标记值（例如 0 表示未知），仅用于区分文件名。
+        split_tag = self.layer_split_front if self.layer_split_front is not None else int(round(1000 * self.layer_split_ratio))
+        front = self.local_tier.download(f"{file_path}.L{split_tag}.front")
+        back = self.remote_tier.download(f"{file_path}.L{split_tag}.back")
         if front is None and back is None:
             return None
 
@@ -148,9 +153,10 @@ class CompositeStorage(AbstractStorage):
         return buf.getvalue()
 
     def exists(self, file_path: str) -> bool:
+        split_tag = self.layer_split_front if self.layer_split_front is not None else int(round(1000 * self.layer_split_ratio))
         return (
-            self.local_tier.exists(file_path + ".front")
-            or self.remote_tier.exists(file_path + ".back")
+            self.local_tier.exists(f"{file_path}.L{split_tag}.front")
+            or self.remote_tier.exists(f"{file_path}.L{split_tag}.back")
         )
 
     def pack_kv_data(
@@ -179,12 +185,13 @@ class CompositeStorage(AbstractStorage):
 
     # 可选：删除两个物理段
     def delete(self, file_path: str) -> bool:
+        split_tag = self.layer_split_front if self.layer_split_front is not None else int(round(1000 * self.layer_split_ratio))
         ok1 = True
         ok2 = True
         del_local = getattr(self.local_tier, "delete", None)
         del_remote = getattr(self.remote_tier, "delete", None)
         if callable(del_local):
-            ok1 = bool(del_local(file_path + ".front"))
+            ok1 = bool(del_local(f"{file_path}.L{split_tag}.front"))
         if callable(del_remote):
-            ok2 = bool(del_remote(file_path + ".back"))
+            ok2 = bool(del_remote(f"{file_path}.L{split_tag}.back"))
         return ok1 and ok2
