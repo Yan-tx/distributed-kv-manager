@@ -55,15 +55,22 @@ class LocalStorage(AbstractStorage):
         full_path = os.path.join(self.local_dir, file_path)
         return os.path.exists(full_path)
 
-    def pack_kv_data(self, k_cache: torch.Tensor, v_cache: torch.Tensor, 
-                    hidden: Optional[torch.Tensor], input_tokens: torch.Tensor, 
-                    roi: torch.Tensor) -> bytes:
+    def pack_kv_data(
+        self,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        input_tokens: torch.Tensor,
+        roi: torch.Tensor,
+    ) -> bytes:
         """打包KV数据为字节流"""
-        logger.debug(f"打包KV数据: k_cache形状={k_cache.shape}, v_cache形状={v_cache.shape}, hidden形状={hidden.shape if hidden is not None else 'None'}")
+        logger.debug(
+            "打包KV数据: k_cache形状=%s, v_cache形状=%s",
+            k_cache.shape,
+            v_cache.shape,
+        )
         data = {
             "k_cache": k_cache.cpu(),
             "v_cache": v_cache.cpu(),
-            "hidden": hidden.cpu() if hidden is not None else None,
             "input_tokens": input_tokens.cpu(),
             "roi": roi.cpu()
         }
@@ -71,7 +78,9 @@ class LocalStorage(AbstractStorage):
         torch.save(data, buffer)
         return buffer.getvalue()
 
-    def unpack_kv_data(self, data: bytes) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def unpack_kv_data(
+        self, data: bytes
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """从字节流解包KV数据"""
         try:
             logger.debug(f"开始解包KV数据，数据大小: {len(data)} 字节")
@@ -79,12 +88,15 @@ class LocalStorage(AbstractStorage):
             loaded = torch.load(buffer, map_location="cpu")
             k_cache = loaded["k_cache"]
             v_cache = loaded["v_cache"]
-            hidden = loaded.get("hidden", None)
-            logger.debug(f"成功解包KV数据: k_cache形状={k_cache.shape}, v_cache形状={v_cache.shape}, hidden形状={hidden.shape if hidden is not None else 'None'}")
-            return k_cache, v_cache, hidden
+            logger.debug(
+                "成功解包KV数据: k_cache形状=%s, v_cache形状=%s",
+                k_cache.shape,
+                v_cache.shape,
+            )
+            return k_cache, v_cache
         except Exception as e:
             logger.error(f"解包KV数据失败: {e}")
-            return None, None, None
+            return None, None
     
     def delete(self, file_path: str) -> bool:
         """删除文件（可选方法）"""

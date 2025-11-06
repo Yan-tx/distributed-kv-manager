@@ -17,7 +17,7 @@ class MetadataCache:
 
         # Pool2: layer_id -> OrderedDict(key -> KVMetadata)
         self.pool2 = {}                    
-        self.pool2_layers = set(pool2_layers or range(30))  
+        self.pool2_layers = set(pool2_layers or range(32))
         self.pool2_capacity = pool2_capacity
 
         # Pool3: LRU for recent accesses
@@ -84,7 +84,7 @@ class MetadataCache:
             self.stats['etcd_hits'] += 1
             logger.debug(f"ETCD 命中: {key_str}")
             return meta
-        
+
         # 5. 未命中
         self.stats['misses'] += 1
         logger.debug(f"未命中: {key_str}")
@@ -114,6 +114,9 @@ class MetadataCache:
         stats = self.stats.copy()
         stats['hit_rate'] = hit_rate
         stats['uptime'] = time.time() - stats['last_reset']
+        stats['pool1_size'] = sum(len(d) for d in self.pool1.values())
+        stats['pool2_size'] = sum(len(d) for d in self.pool2.values())
+        stats['pool3_size'] = len(self.pool3)
         
         return stats
 

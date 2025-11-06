@@ -49,13 +49,21 @@ class CrailStorage(AbstractStorage):
         ]
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            chunks = []
+            chunks: list[bytes] = []
+            stdout_pipe = process.stdout
+            if stdout_pipe is None:
+                process.kill()
+                logger.error("Crail download failed: stdout is None")
+                return None
             while True:
-                chunk = process.stdout.read(16 * 1024 * 1024)
+                chunk = stdout_pipe.read(16 * 1024 * 1024)
                 if not chunk:
                     break
                 chunks.append(chunk)
-            stderr = process.stderr.read()
+            stderr_pipe = process.stderr
+            stderr = b""
+            if stderr_pipe is not None:
+                stderr = stderr_pipe.read()
             process.wait()
             if process.returncode != 0:
                 logger.error(f"Crail download failed: {stderr.decode()}")
@@ -82,14 +90,17 @@ class CrailStorage(AbstractStorage):
         except subprocess.TimeoutExpired:
             return False
 
-    def pack_kv_data(self, k_cache: torch.Tensor, v_cache: torch.Tensor, 
-                    hidden: Optional[torch.Tensor], input_tokens: torch.Tensor, 
-                    roi: torch.Tensor) -> bytes:
+    def pack_kv_data(
+        self,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        input_tokens: torch.Tensor,
+        roi: torch.Tensor,
+    ) -> bytes:
         """打包KV数据为字节流"""
         data = {
             "k_cache": k_cache.cpu(),
             "v_cache": v_cache.cpu(),
-            "hidden": hidden.cpu() if hidden is not None else None,
             "input_tokens": input_tokens.cpu(),
             "roi": roi.cpu()
         }
@@ -97,12 +108,14 @@ class CrailStorage(AbstractStorage):
         torch.save(data, buffer)
         return buffer.getvalue()
 
-    def unpack_kv_data(self, data: bytes) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def unpack_kv_data(
+        self, data: bytes
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """从字节流解包KV数据"""
         try:
             buffer = io.BytesIO(data)
             loaded = torch.load(buffer, map_location="cpu")
-            return loaded["k_cache"], loaded["v_cache"], loaded.get("hidden", None)
+            return loaded["k_cache"], loaded["v_cache"]
         except Exception as e:
             logger.error(f"Failed to unpack KV data: {e}")
-            return None, None, None
+            return None, None

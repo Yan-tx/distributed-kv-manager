@@ -6,7 +6,7 @@ import time
 import struct
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 from types import SimpleNamespace
 from .base import DistributedKVEngineBase, StoreStatus, RetrieveStatus
 from distributed_kv_manager.metadata.etcd import KVMetadataManager, KVMetadata
@@ -39,7 +39,10 @@ class KVEngine(DistributedKVEngineBase):
         self._futures = []
 
         # 使用存储工厂创建存储实例
-        self._storage: AbstractStorage = StorageFactory.create_storage(config)
+        _storage_inst = StorageFactory.create_storage(config)
+        if _storage_inst is None:
+            raise RuntimeError("StorageFactory.create_storage 返回 None")
+        self._storage = _storage_inst
         logger.info(f"创建的存储实例类型: {type(self._storage)}")
         self.storage_dir = getattr(config.kv_transfer_config, "storage_dir", "/kvcache")
 
@@ -101,9 +104,23 @@ class KVEngine(DistributedKVEngineBase):
         logger.debug(f"KV Cache 命中")
         return RetrieveStatus.HIT
 
-    def store_kv(self, model_config, parallel_config, transfer_config,
-            model_executable, model_input, kv_caches, store_status, hidden_or_intermediate_states):
-        """基于元数据缓存的两阶段提交写入 KV 缓存和隐藏状态（异步提交）"""
+    def store_kv(
+        self,
+        model_config,
+        parallel_config,
+        transfer_config,
+        model_executable,
+        model_input,
+        kv_caches,
+        store_status,
+        hidden_or_intermediate_states=None,
+        ):
+        """基于元数据缓存的两阶段提交写入 KV 缓存（异步提交）。
+
+        Args:
+            hidden_or_intermediate_states: 兼容旧接口的占位参数（当前未使用）。
+        """
+        _ = hidden_or_intermediate_states  # 占位以保持接口兼容
         input_tokens = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping = model_input.attn_metadata.slot_mapping  # 保持二维形状
@@ -184,35 +201,55 @@ class KVEngine(DistributedKVEngineBase):
             all_values = torch.cat(all_values, dim=0) if all_values else torch.tensor([])
             
             roi = torch.ones_like(current_tokens, dtype=torch.bool)
-            hidden_state = hidden_or_intermediate_states
-            if hidden_state is not None:
-                hidden_state = hidden_state[start_pos:end_pos].contiguous()
-                logger.debug(f"准备存储的hidden_state形状: {hidden_state.shape}")
-            else:
-                logger.debug("准备存储的hidden_state为None (正常情况，若仅使用KV Cache)")
 
             # ------------------ 第四步：异步写入 KV 和更新元数据 ------------------ #
             # 使用辅助类确保变量正确捕获
             class InsertAndUpdateTask:
-                def __init__(self, engine, seq_idx, file_path, all_keys, all_values, 
-                            hidden_state, current_tokens, roi, meta):
+                def __init__(
+                    self,
+                    engine,
+                    seq_idx,
+                    file_path,
+                    all_keys,
+                    all_values,
+                    current_tokens,
+                    roi,
+                    current_slots,
+                    meta,
+                ):
                     self.engine = engine
                     self.seq_idx = seq_idx
                     self.file_path = file_path
                     self.all_keys = all_keys
                     self.all_values = all_values
-                    self.hidden_state = hidden_state
                     self.current_tokens = current_tokens
                     self.roi = roi
+                    self.current_slots = current_slots
                     self.meta = meta
                 
                 def __call__(self):
                     try:
                         logger.debug(f"开始处理序列 {self.seq_idx}: {self.file_path}")
                         
-                        # 写入存储
-                        self.engine._storage_insert(self.file_path, self.all_keys, self.all_values, 
-                                                self.hidden_state, self.current_tokens, self.roi)
+                        # 构造 payload_meta
+                        payload_meta = {
+                            "schema_version": 1,
+                            "tokens_hash": self.engine._tensor_hash(self.current_tokens),
+                            "num_layers": int(self.all_keys.shape[0]) if self.all_keys.numel() > 0 else 0,
+                            "kv_dtype": str(self.all_keys.dtype) if self.all_keys.numel() > 0 else "unknown",
+                            "kv_tail_shape": list(self.all_keys.shape[2:]) if self.all_keys.numel() > 0 else [],
+                        }
+
+                        # 写入存储（包含slot_mapping与payload_meta）
+                        self.engine._storage_insert(
+                            self.file_path,
+                            self.all_keys,
+                            self.all_values,
+                            self.current_tokens,
+                            self.roi,
+                            self.current_slots,
+                            payload_meta,
+                        )
                         logger.debug(f"序列 {self.seq_idx} 存储完成")
                         
                         # 写入完成后更新元数据
@@ -230,120 +267,81 @@ class KVEngine(DistributedKVEngineBase):
                         logger.error(f"存储序列 {self.seq_idx} ({self.file_path}) 失败: {e}", exc_info=True)
 
             # 创建任务实例并提交
-            task = InsertAndUpdateTask(self, seq_idx, file_path, all_keys, all_values, 
-                                    hidden_state, current_tokens, roi, meta)
+            task = InsertAndUpdateTask(
+                self,
+                seq_idx,
+                file_path,
+                all_keys,
+                all_values,
+                current_tokens,
+                roi,
+                current_slots,
+                meta,
+            )
             future = self._executor.submit(task)
             self._futures.append(future)
 
     def retrieve_kv(self, model_executable, model_input, kv_caches, retrieve_status):
-        """
-        从 KV 缓存检索 KV 与隐藏状态。
-        bypass_model_exec 由外部传入的 retrieve_status 决定。
-        """
+        """从存储中恢复 KV 缓存，并按照 LMCache 的返回约定提供结果。"""
         input_tokens = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping = model_input.attn_metadata.slot_mapping  # 保持二维形状
-        num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         num_layers = len(kv_caches)
 
-        num_tok = len(model_input.input_tokens)
-        num_dim = model_executable.model.embed_tokens.embedding_dim
-        dtype = model_executable.model.embed_tokens.weight.dtype
-        device = model_input.input_tokens.device
-        all_hidden_states = torch.zeros(
-            num_tok, num_dim, device=device, dtype=dtype
-        )
+        if retrieve_status != RetrieveStatus.HIT:
+            logger.debug("检索状态为 MISS，跳过 KV 恢复")
+            return None, False, model_input
 
-        bypass_model_exec = (retrieve_status == RetrieveStatus.HIT)
-        filled_hidden_tokens = 0
+        logger.debug(f"开始检索KV，序列数量: {len(seq_lens)}")
 
-        logger.debug(f"开始检索KV，检索状态: {retrieve_status}, 序列数量: {len(seq_lens)}")
-        
+        # 标记全部序列是否都成功恢复（用于决定是否 bypass 前向）
+        recovered_sequences = 0
+
         for seq_idx, seq_len in enumerate(seq_lens):
             start_pos = sum(seq_lens[:seq_idx])
             end_pos = start_pos + seq_len
 
-            if start_pos >= num_prefill_tokens:
-                bypass_model_exec = False
-                continue
-
             current_tokens = input_tokens[start_pos:end_pos]
-            # 获取session_id和layer_id
             session_id = getattr(model_input, "session_id", None)
             layer_id = getattr(model_input, "layer_id", None)
             file_path = self._make_key(current_tokens, session_id, layer_id)
-            roi = torch.ones_like(current_tokens, dtype=torch.bool)
 
-            if not bypass_model_exec:
-                continue  # 没命中，直接交给模型执行
-
-            # 元数据命中，则读取 KV
-            logger.debug(f"检索序列 {seq_idx}: {file_path}")
-            
-            # 检查元数据是否已过期
             meta = self._meta_cache.get_metadata(key=file_path)
             if meta and meta.is_expired():
-                logger.warning(f"序列 {seq_idx} 元数据已过期")
-                bypass_model_exec = False
+                logger.debug(f"序列 {seq_idx} 元数据已过期: {file_path}")
                 continue
-            
-            # 更新last_access时间实现续命（异步更新）
-            self._update_last_access_time(file_path)
-            
-            key, value, hidden = self._storage_download(file_path)
-            logger.debug(
-                "检索到的hidden形状: %s",
-                hidden.shape if hidden is not None else "None"
-            )
 
-            if key is None or value is None :
-                logger.warning(f"序列 {seq_idx} 检索失败，文件可能不存在或损坏")
-                logger.warning(f"文件路径: {file_path}")
-                # 检查文件是否存在
-                if not self._storage_exists(file_path):
-                    logger.warning(f"文件 {file_path} 不存在")
-                else:
-                    logger.warning(f"文件 {file_path} 存在但可能已损坏")
-                    # 增加更多诊断信息
-                    logger.warning(f"下载的key是否为None: {key is None}")
-                    logger.warning(f"下载的value是否为None: {value is None}")
-                bypass_model_exec = False
+            self._update_last_access_time(file_path)
+
+            # 读取纯KV负载与扩展信息
+            kv_bytes = self._storage_download_kv_bytes(file_path)
+            if kv_bytes is None:
+                logger.debug(f"序列 {seq_idx} 的 KV 数据缺失或损坏: {file_path}")
+                continue
+
+            payload_info = self._storage.extract_payload_info(kv_bytes)
+
+            # 优先使用持久化的slot_mapping（若存在）
+            persisted_slots = payload_info.get("slot_mapping")
+
+            # 可选一致性校验：token哈希/层数/形状
+            payload_meta = payload_info.get("payload_meta", {}) if isinstance(payload_info, dict) else {}
+            expected_layers = payload_meta.get("num_layers")
+            tokens_hash = payload_meta.get("tokens_hash")
+
+            try:
+                # 获取 KV 张量
+                key, value = self._storage.unpack_kv_data(kv_bytes)
+            except Exception:
+                key, value = None, None
+            if key is None or value is None:
+                logger.debug(f"序列 {seq_idx} 的 KV 数据解包失败: {file_path}")
                 continue
 
             device = input_tokens.device
-            key, value = key.to(device), value.to(device)
-            hidden_on_device = None
-            if hidden is None:
-                logger.debug(f"序列 {seq_idx} 未恢复到 hidden_state，无法跳过模型执行")
-                bypass_model_exec = False
-            else:
-                try:
-                    hidden_on_device = hidden.to(device=device)
-                    if hidden_on_device.dtype != dtype:
-                        hidden_on_device = hidden_on_device.to(dtype=dtype)
-                    expected_hidden_len = end_pos - start_pos
-                    if hidden_on_device.shape[0] != expected_hidden_len:
-                        logger.error(
-                            f"hidden_state 长度不匹配: 期望 {expected_hidden_len}, 实际 {hidden_on_device.shape[0]}"
-                        )
-                        bypass_model_exec = False
-                        hidden_on_device = None
-                except Exception as e:
-                    logger.error(f"hidden_state 迁移失败: {e}", exc_info=True)
-                    bypass_model_exec = False
-                    hidden_on_device = None
+            key = key.to(device)
+            value = value.to(device)
 
-            # 打印检索到的KV形状信息
-            logger.debug(
-                "检索到的KV形状 - key: %s, value: %s, hidden: %s",
-                key.shape,
-                value.shape,
-                hidden_on_device.shape if hidden_on_device is not None else (
-                    hidden.shape if hidden is not None else "None"
-                ),
-            )
-
-            # 使用序列索引获取当前序列的槽位映射
             current_slots = slot_mapping[seq_idx]
             if current_slots.dim() > 1:
                 current_slots = current_slots.reshape(-1)
@@ -351,79 +349,127 @@ class KVEngine(DistributedKVEngineBase):
                 current_slots = current_slots.unsqueeze(0)
             if current_slots.numel() != seq_len:
                 logger.warning(
-                    "序列 %s 的槽位映射长度(%d)与序列长度(%d)不一致，无法完全命中",
+                    "序列 %s 的槽位映射长度(%d)与序列长度(%d)不一致",
                     file_path,
                     current_slots.numel(),
                     seq_len,
                 )
                 limit = min(current_slots.numel(), seq_len)
                 current_slots = current_slots[:limit]
-                end_pos = start_pos + limit
-                if hidden_on_device is not None:
-                    hidden_on_device = hidden_on_device[:limit]
                 seq_len = limit
+                end_pos = start_pos + limit
                 if limit == 0:
-                    bypass_model_exec = False
                     continue
-            logger.debug(f"当前槽位: {current_slots}, 形状: {current_slots.shape}")
+
+            # 若存在持久化的 slot_mapping，则优先使用
+            if persisted_slots is not None:
+                try:
+                    persisted_slots = persisted_slots.reshape(-1)
+                    if persisted_slots.numel() != current_slots.numel():
+                        limit = min(persisted_slots.numel(), current_slots.numel())
+                        persisted_slots = persisted_slots[:limit]
+                        current_slots = current_slots[:limit]
+                        seq_len = limit
+                        if limit == 0:
+                            continue
+                    slots_to_use = persisted_slots.to(current_slots.device)
+                except Exception:
+                    slots_to_use = current_slots
+            else:
+                slots_to_use = current_slots
+
+            # 轻量校验：层数与token哈希（存在时）
+            if expected_layers is not None and int(expected_layers) != len(kv_caches):
+                logger.warning(
+                    "层数不一致: payload=%s, runtime=%s; 跳过该序列",
+                    expected_layers,
+                    len(kv_caches),
+                )
+                continue
+            if tokens_hash is not None:
+                cur_hash = self._tensor_hash(current_tokens)
+                if tokens_hash != cur_hash:
+                    logger.warning("token哈希不一致，跳过该序列: %s", file_path)
+                    continue
+
+            logger.debug(
+                "恢复 KV: 序列 %d, file=%s, 槽位数=%d",
+                seq_idx,
+                file_path,
+                current_slots.numel(),
+            )
 
             try:
                 for layer_idx in range(num_layers):
                     layer_k, layer_v = key[layer_idx], value[layer_idx]
                     kv_cache = kv_caches[layer_idx]
                     key_cache, value_cache = self.split_kv_cache(kv_cache)
-                    
-                    # 打印形状信息，帮助诊断问题
-                    logger.debug(f"层 {layer_idx}: layer_k形状: {layer_k.shape}, layer_v形状: {layer_v.shape}")
-                    logger.debug(f"层 {layer_idx}: key_cache形状: {key_cache.shape}, value_cache形状: {value_cache.shape}")
-                    logger.debug(f"层 {layer_idx}: 当前槽位形状: {current_slots.shape}")
-                    
-                    # 检查形状是否匹配
-                    if layer_k.shape[0] != current_slots.numel():
-                        logger.error(f"形状不匹配: 层 {layer_idx} 的KV缓存有 {layer_k.shape[0]} 个token, 但槽位映射有 {current_slots.numel()} 个槽位")
-                        bypass_model_exec = False
-                        break
-                        
-                    # 如果 current_slots 是标量，需要特殊处理
-                    if current_slots.dim() == 0:
-                        current_slots = current_slots.unsqueeze(0)
-                    
-                    # 直接更新 key_cache 和 value_cache，避免使用 torch.stack 创建临时大张量
-                    # torch.stack 会创建一个新的张量，可能导致内存峰值
-                    key_cache[current_slots] = layer_k
-                    value_cache[current_slots] = layer_v
-                    # 分别更新 kv_cache 的两个部分
-                    kv_cache[0] = key_cache
-                    kv_cache[1] = value_cache
-                    # 不再使用 torch.stack，因为 kv_cache 本身已经是正确的结构
-                    # kv_caches[layer_idx] = torch.stack([key_cache, value_cache], dim=0)
-                    
+
+                    if layer_k.shape[0] != slots_to_use.numel():
+                        logger.error(
+                            "KV 形状不匹配: 层 %d 期望 %d 个token, 实际 %d",
+                            layer_idx,
+                            slots_to_use.numel(),
+                            layer_k.shape[0],
+                        )
+                        raise ValueError("KV shape mismatch")
+
+                    key_cache[slots_to_use] = layer_k.to(key_cache.dtype)
+                    value_cache[slots_to_use] = layer_v.to(value_cache.dtype)
+
+                recovered_sequences += 1
             except Exception as e:
-                logger.error(f"在序列 {seq_idx} 层 {layer_idx} 处理KV缓存时发生错误: {e}")
-                logger.error(f"key_cache形状: {key_cache.shape}, layer_k形状: {layer_k.shape}")
-                logger.error(f"current_slots: {current_slots}")
-                bypass_model_exec = False
-                # 重新抛出异常，以便外部捕获
-                raise
+                logger.error(
+                    f"在序列 {seq_idx} 层 {layer_idx} 恢复 KV 时出错: {e}",
+                    exc_info=True,
+                )
+                break
 
-            if bypass_model_exec and hidden_on_device is not None:
-                all_hidden_states[start_pos:end_pos] = hidden_on_device
-                filled_hidden_tokens += hidden_on_device.shape[0]
-
-        if bypass_model_exec:
-            required_tokens = int(num_prefill_tokens) if num_prefill_tokens is not None else 0
-            if required_tokens > 0 and filled_hidden_tokens < required_tokens:
-                logger.debug("恢复的隐藏态数量不足，无法完全跳过模型执行")
-                bypass_model_exec = False
-            elif filled_hidden_tokens == 0:
-                bypass_model_exec = False
-
-        if bypass_model_exec and filled_hidden_tokens > 0:
-            logger.debug(f"成功跳过模型执行，恢复的隐藏态数量: {filled_hidden_tokens}")
-            return all_hidden_states, True, model_input
-        else:
-            logger.debug("进行前向传播")
+        if recovered_sequences != len(seq_lens):
+            logger.debug(
+                "KV 恢复未全部成功 (成功 %d / 期望 %d)，继续执行模型前向",
+                recovered_sequences,
+                len(seq_lens),
+            )
             return None, False, model_input
+
+        # 全量命中：构造全 0 hidden 占位以允许上层绕过模型前向
+        try:
+            total_tokens = sum(seq_lens)
+            hidden_dim = None
+            # 优先从 model_executable 中推断 embedding 维度
+            if model_executable is not None:
+                emb_mod = getattr(getattr(model_executable, "model", None), "embed_tokens", None)
+                if emb_mod is not None:
+                    hidden_dim = getattr(emb_mod, "embedding_dim", None)
+                    if hidden_dim is None and hasattr(emb_mod, "weight"):
+                        # 退化：从权重形状猜测 (vocab, hidden_dim)
+                        wt = getattr(emb_mod, "weight")
+                        if hasattr(wt, "shape") and len(wt.shape) >= 2:
+                            hidden_dim = wt.shape[-1]
+            # 如果仍无法获取，使用 KV 的尾部维度近似（num_heads * head_dim）
+            if hidden_dim is None:
+                # 期望 kv_caches[layer] 形状: [2, total_slots, num_heads, head_dim] 或更多尾部维
+                sample = kv_caches[0]
+                if sample.dim() >= 4:
+                    hidden_dim = sample.shape[-1] * sample.shape[-2]
+                else:
+                    hidden_dim = 1  # 最小占位
+            device = input_tokens.device
+            dtype = kv_caches[0].dtype if len(kv_caches) > 0 else torch.float16
+            hidden_placeholder = torch.zeros(
+                (total_tokens, hidden_dim), device=device, dtype=dtype
+            )
+        except Exception as e:
+            logger.warning(f"构造隐藏占位失败，fallback 为 None: {e}")
+            hidden_placeholder = None
+            return hidden_placeholder, False, model_input
+
+        logger.debug(
+            "KV 全量命中，返回零张量 hidden 占位并设置 bypass=True, shape=%s",
+            None if hidden_placeholder is None else tuple(hidden_placeholder.shape),
+        )
+        return hidden_placeholder, True, model_input
 
     # ------------------ Helper: KV 结构 ------------------ #
     @staticmethod
@@ -440,7 +486,12 @@ class KVEngine(DistributedKVEngineBase):
         tensor_bytes = tensor.cpu().numpy().tobytes()
         return hashlib.blake2b(tensor_bytes).hexdigest()
 
-    def _make_key(self, input_tokens: torch.Tensor, session_id: bytes = None, layer_id: int = None) -> str:
+    def _make_key(
+        self,
+        input_tokens: torch.Tensor,
+        session_id: Optional[bytes] = None,
+        layer_id: Optional[int] = None,
+    ) -> str:
         seq_hash = self._tensor_hash(input_tokens)
         # 如果没有提供session_id和layer_id，使用默认值
         if session_id is None:
@@ -452,29 +503,41 @@ class KVEngine(DistributedKVEngineBase):
         # 构造文件名，不包含路径前缀
         return f"kv_{session_str}_layer_{layer_id}_{seq_hash}.pt"
     
-    def _storage_insert(self, file_path: str, k_cache, v_cache, hidden, input_tokens, roi):
-        """使用存储后端打包并上传数据，并嵌入元数据用于恢复"""
-        # 首先打包KV数据
-        data = self._storage.pack_kv_data(k_cache, v_cache, hidden, input_tokens, roi)
-        
-        # 获取文件的元数据
+    def _storage_insert(
+        self,
+        file_path: str,
+        k_cache,
+        v_cache,
+        input_tokens,
+        roi,
+        slot_mapping: Optional[torch.Tensor] = None,
+        payload_meta: Optional[dict] = None,
+    ):
+        """使用存储后端打包并上传数据，并嵌入元数据用于恢复（包含slot_mapping与meta）。"""
+        # 使用扩展打包完整负载
+        data = self._storage.pack_full_payload(
+            k_cache, v_cache, input_tokens, roi, slot_mapping, payload_meta
+        )
+
+        # 获取文件的元数据并嵌入（如可用）
         meta = self._meta_cache.get_metadata(key=file_path)
         if meta:
-            # 将元数据打包并嵌入到数据开头
             metadata_bytes = meta.pack_with_embedding()
             data = metadata_bytes + data
-            
+
         success = self._storage.upload(file_path, data)
         if not success:
             logger.error(f"Failed to upload KV data to {file_path}")
 
-    def _storage_download(self, file_path: str) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _storage_download(
+        self, file_path: str
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """使用存储后端下载并解包数据"""
         logger.debug(f"开始下载文件: {file_path}")
         data = self._storage.download(file_path)
         if data is None:
             logger.warning(f"下载文件 {file_path} 失败，文件可能不存在")
-            return None, None, None
+            return None, None
             
         logger.debug(f"成功下载文件 {file_path}，数据大小: {len(data)} 字节")
             
@@ -506,6 +569,26 @@ class KVEngine(DistributedKVEngineBase):
         # 如果没有元数据嵌入或提取失败，直接解包整个数据
         logger.debug(f"直接解包整个数据，大小: {len(data)} 字节")
         return self._storage.unpack_kv_data(data)
+
+    def _storage_download_kv_bytes(self, file_path: str) -> Optional[bytes]:
+        """下载文件并返回纯KV负载字节（去掉嵌入的元数据头）。"""
+        data = self._storage.download(file_path)
+        if data is None:
+            return None
+        try:
+            from distributed_kv_manager.metadata.etcd import (
+                METADATA_HEADER,
+                METADATA_VERSION,
+                HEADER_SIZE,
+                METADATA_SIZE,
+            )
+            if len(data) >= HEADER_SIZE + METADATA_SIZE:
+                header, version = struct.unpack("<4sI", data[:HEADER_SIZE])
+                if header == METADATA_HEADER and version == METADATA_VERSION:
+                    return data[HEADER_SIZE + METADATA_SIZE :]
+        except Exception:
+            pass
+        return data
 
     def _storage_exists(self, file_path: str) -> bool:
         """使用存储后端检查文件是否存在"""
@@ -549,7 +632,7 @@ from ..config_loader import load_config_from_json
 
 _engine_singleton: KVEngine | None = None  
 
-def init_engine(config=None, config_path=None):
+def init_engine(config=None, config_path: Optional[str] = None):
     """
     初始化并返回 engine 单例。传入 vllm 的 config 或从 config.json 读取配置。
     
@@ -561,13 +644,13 @@ def init_engine(config=None, config_path=None):
     if _engine_singleton is None:
         # 如果没有提供config，则从配置文件加载
         if config is None:
-            config = load_config_from_json(config_path)
+            config = load_config_from_json(config_path) if config_path is not None else load_config_from_json()
         else:
             # 尝试加载config.json，并与传入的config合并，使JSON生效
             json_cfg = None
             try:
                 # 优先使用显式提供的config_path，否则使用默认查找
-                json_cfg = load_config_from_json(config_path)
+                json_cfg = load_config_from_json(config_path) if config_path is not None else load_config_from_json()
             except FileNotFoundError:
                 # 若找不到则保持传入的config
                 json_cfg = None
@@ -612,7 +695,8 @@ def should_store(model_input):
     return engine.should_store(model_input)
 
 def store_kv(model_config, parallel_config, transfer_config,
-             model_executable, model_input, kv_caches, store_status, hidden_or_intermediate_states):
+             model_executable, model_input, kv_caches, store_status,
+             hidden_or_intermediate_states=None):
     """
     模块级 store_kv 接口，委托给 engine 的 store_kv。
     """
@@ -620,7 +704,8 @@ def store_kv(model_config, parallel_config, transfer_config,
     if engine is None:
         raise RuntimeError("Engine not initialized. Call init_engine(config) first.")
     return engine.store_kv(model_config, parallel_config, transfer_config,
-                           model_executable, model_input, kv_caches, store_status, hidden_or_intermediate_states)
+                           model_executable, model_input, kv_caches, store_status,
+                           hidden_or_intermediate_states)
 
 def should_retrieve(model_input):
     """

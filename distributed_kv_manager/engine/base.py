@@ -14,7 +14,8 @@ class DistributedKVEngineBase:
         raise NotImplementedError
 
     def store_kv(self, model_config, parallel_config, transfer_config,
-                 model_executable, model_input, kv_caches, store_status):
+                 model_executable, model_input, kv_caches, store_status,
+                 hidden_or_intermediate_states=None):
         raise NotImplementedError
 
     def should_retrieve(self, model_input) -> RetrieveStatus:
@@ -55,10 +56,12 @@ def should_store(model_input) -> StoreStatus:
     return _engine_instance.should_store(model_input)
 
 def store_kv(model_config, parallel_config, transfer_config,
-             model_executable, model_input, kv_caches, store_status):
+             model_executable, model_input, kv_caches, store_status,
+             hidden_or_intermediate_states=None):
     return _engine_instance.store_kv(model_config, parallel_config,
                                      transfer_config, model_executable,
-                                     model_input, kv_caches, store_status)
+                                     model_input, kv_caches, store_status,
+                                     hidden_or_intermediate_states)
 
 def should_retrieve(model_input) -> RetrieveStatus:
     return _engine_instance.should_retrieve(model_input)

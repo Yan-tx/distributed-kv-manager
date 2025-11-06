@@ -137,13 +137,19 @@ class CachingStorage(AbstractStorage):
         # 检查后端存储
         return self.storage_backend.exists(file_path)
     
-    def pack_kv_data(self, k_cache: torch.Tensor, v_cache: torch.Tensor, 
-                    hidden: Optional[torch.Tensor], input_tokens: torch.Tensor, 
-                    roi: torch.Tensor) -> bytes:
+    def pack_kv_data(
+        self,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        input_tokens: torch.Tensor,
+        roi: torch.Tensor,
+    ) -> bytes:
         """打包KV数据为字节流"""
-        return self.storage_backend.pack_kv_data(k_cache, v_cache, hidden, input_tokens, roi)
+        return self.storage_backend.pack_kv_data(k_cache, v_cache, input_tokens, roi)
     
-    def unpack_kv_data(self, data: bytes) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def unpack_kv_data(
+        self, data: bytes
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """从字节流解包KV数据"""
         return self.storage_backend.unpack_kv_data(data)
     
@@ -213,7 +219,7 @@ class CachingStorage(AbstractStorage):
             
         return session_files
     
-    def _generate_recent_files(self, dir_path: str, exclude: str = None) -> List[str]:
+    def _generate_recent_files(self, dir_path: str, exclude: Optional[str] = None) -> List[str]:
         """生成目录下最近修改的文件列表"""
         try:
             # 获取目录下所有KV文件
