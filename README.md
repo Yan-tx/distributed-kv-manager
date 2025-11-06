@@ -1,30 +1,30 @@
 # Distributed KV Manager
 
-A distributed key-value cache manager designed for efficient storage and retrieval of KV (Key-Value) caches in large language model inference scenarios. This system provides high-performance caching with support for distributed storage backends like Crail and local filesystems.
+A distributed key-value cache manager for large language model (LLM) inference. It provides pluggable storage backends, composite (local + remote) layer splitting, multi‑tier data caching (memory + SSD), ETCD‑backed metadata with recovery, and optional prefetch + IO aggregation.
 
 ## Features
 
-- **Distributed KV Caching**: Efficiently store and retrieve KV caches for LLM inference
-- **Multiple Storage Backends**: Support for Crail and local filesystem storage
-- **Metadata Management**: Robust metadata management using ETCD with connection pooling and failover
-- **Caching Layer**: Three-tier metadata caching for improved performance
-- **Asynchronous Operations**: Non-blocking storage operations with thread pool execution
-- **Fault Tolerance**: Automatic failover and replication for ETCD metadata
-- **Flexible Configuration**: Easy configuration of storage backends and cache policies
-- **Automatic Cleanup**: Automatic cleanup of expired KV caches based on configurable expiration time
-- **Metadata Recovery**: Ability to recover metadata from storage files
-- **Enhanced Logging**: Detailed logging for debugging and monitoring
+- **Distributed KV Caching**: Store / retrieve per‑sequence KV tensors for reuse
+- **Pluggable Storage Backends**: Local filesystem, Crail, or custom (dynamic class import)
+- **Composite Storage (NEW)**: Split KV along layer dimension: front part local, back part remote; transparent merge on download
+- **Two‑Level Data Cache (NEW)**: In‑memory + optional SSD cache (`cache_mode`: `none` | `only_mem` | `mem_and_ssd`)
+- **Prefetch + IO Aggregation (NEW)**: Windowed batching with bandwidth budgeting; prefetch data lands in memory first
+- **Metadata Management**: ETCD with connection pooling, failover, buffered writes, and embedded file headers for recovery
+- **Three‑Tier Metadata Cache**: Session → Layer → LRU hierarchy
+- **Expiration + Cleanup**: Background thread removes expired entries (metadata + payload)
+- **Metadata Recovery**: Reconstruct lost ETCD entries from file headers
+- **Flexible Configuration Merge**: Runtime config overridden by `config.json` values
+- **Enhanced Logging & Extensibility**: Clear instrumentation points, dynamic backend selection
 
-## Architecture
+## Architecture Overview
 
-The system consists of several key components:
-
-1. **KV Engine**: Core engine that handles storage and retrieval operations
-2. **Storage Layer**: Abstract storage interface with implementations for Crail and local storage
-3. **Metadata Manager**: ETCD-based metadata management with connection pooling
-4. **Metadata Cache**: Three-tier caching system for improved metadata access performance
-5. **Storage Factory**: Factory pattern for creating appropriate storage backends
-6. **Cleanup Manager**: Automatic cleanup of expired KV caches
+1. **KV Engine** – Decides store/retrieve, packs KV payloads, integrates metadata & prefetch
+2. **Storage Layer** – `AbstractStorage` implementations (local / Crail / composite / custom)
+3. **Composite Storage** – Layer‑wise split into `.front` + `.back` physical files
+4. **Metadata Manager** – ETCD ops (pooling, buffering, failover)
+5. **Metadata Cache** – 3 tiers (session, layer, LRU) to reduce ETCD hits
+6. **Cleanup Manager** – Scans + expires KV entries
+7. **Caching Wrapper** – Memory + SSD + prefetch & IO aggregation
 
 ### Key Components
 
@@ -36,9 +36,11 @@ The main engine that orchestrates KV cache storage and retrieval operations. It 
 - Checking metadata expiration during retrieval operations
 
 #### Storage Backends
-Support for multiple storage backends:
-- **Crail Storage**: High-performance distributed storage system
-- **Local Storage**: Filesystem-based local storage for development/testing
+Supported / pluggable backends:
+- **LocalStorage**: Filesystem reference implementation
+- **CrailStorage**: High‑performance distributed storage (optional)
+- **CompositeStorage**: Composes a local + remote backend with layer splitting
+- **Custom**: Dynamic import via config (`remote_backend_class` or new `storage_type`)
 
 #### Metadata Management
 Robust metadata management using ETCD with:
@@ -62,26 +64,18 @@ Automatic cleanup of expired KV caches:
 - Deletion of both metadata and storage files for expired entries
 - Extension of metadata lifetime on access (touch mechanism)
 
+git clone https://github.com/Yan-tx/distributed-kv-manager.git
 ## Installation
 
 ```bash
-# Clone the repository
+# Clone
 git clone https://github.com/Yan-tx/distributed-kv-manager.git
-cd distributed_kv_manager
+cd distributed-kv-manager
 
-# Install the package
+# Editable install (ensure torch + etcd3 installed in environment)
 pip install -e .
-```
 
-### Local ETCD Setup for Development
-
-For local development and testing, you can run a minimal ETCD instance with the following commands:
-
-```bash
-# Navigate to your etcd directory
-cd ~/etcd
-
-# Start ETCD in the background
+# Start ETCD (example)
 nohup ./etcd \
   --data-dir /tmp/etcd-data \
   --listen-client-urls http://0.0.0.0:2379 \
@@ -89,18 +83,15 @@ nohup ./etcd \
   > /tmp/etcd.log 2>&1 &
 ```
 
-This will start an ETCD server listening on port 2379, which is the default port expected by the KV manager.
+ETCD should listen on `127.0.0.1:2379` by default for tests.
 
-## Configuration
 
 The system can be configured in two ways:
 
 ### 1. Using Python Configuration Objects
-
 The system can be configured through the `kv_transfer_config` object with the following options:
 
 ```python
-config.kv_transfer_config = SimpleNamespace(
     storage_type="crail",        # or "local"
     storage_dir="/kvcache",      # Base directory for storage
     etcd_endpoints=["127.0.0.1:2379"],  # ETCD endpoints
@@ -149,15 +140,97 @@ from distributed_kv_manager import init_engine
 engine = init_engine()
 ```
 
-### Storage Configuration
+### Storage Configuration (Basic)
 
-- **Crail Storage**: Set `storage_type="crail"` and configure `crail_dir`
-- **Local Storage**: Set `storage_type="local"` and configure `local_dir`
-- **SSD Caching**: Enable SSD caching by setting `enable_ssd_caching=True` and configure `ssd_cache_dir`
+- Local only:
+  ```json
+  {"kv_transfer_config": {"storage_type": "local", "local_dir": "/tmp/kvcache"}}
+  ```
+- Crail only (legacy name):
+  ```json
+  {"kv_transfer_config": {"storage_type": "crail", "crail_dir": "/crail/kvcache"}}
+  ```
+
+### Composite Storage Configuration
+
+Split KV layers so early layers (front) stay local, remaining (back) remote.
+
+Key options:
+- `storage_type": "composite"`
+- `local_dir`: Local base path
+- `remote_dir`: Remote base path (preferred); falls back to `crail_dir` if absent
+- `layer_split_front`: Explicit front layer count (overrides ratio)
+- `layer_split_ratio`: Fraction (0~1) if `layer_split_front` not set (default 0.5)
+- Remote backend selection:
+  - `remote_backend_type`: `crail` | `local` | `noop` (placeholder) | custom class path
+  - `remote_backend_class`: Fully‑qualified `module.ClassName` (overrides type)
+
+Examples:
+
+1) Ratio split (half local):
+```json
+{"kv_transfer_config": {
+  "storage_type": "composite",
+  "local_dir": "/data/kvcache_local",
+  "remote_dir": "/data/kvcache_remote",
+  "layer_split_ratio": 0.5
+}}
+```
+
+2) Explicit front count:
+```json
+{"kv_transfer_config": {
+  "storage_type": "composite",
+  "local_dir": "/data/kvcache_local",
+  "remote_dir": "/data/kvcache_remote",
+  "layer_split_front": 12
+}}
+```
+
+3) Placeholder remote (development):
+```json
+{"kv_transfer_config": {
+  "storage_type": "composite",
+  "local_dir": "/data/kvcache_local",
+  "remote_dir": "/data/unused_remote",
+  "remote_backend_type": "noop"
+}}
+```
+
+4) Dynamic custom class:
+```json
+{"kv_transfer_config": {
+  "storage_type": "composite",
+  "local_dir": "/data/kvcache_local",
+  "remote_dir": "/data/remote",
+  "remote_backend_class": "my_pkg.backends.MyRemoteStorage"
+}}
+```
+
+If the remote backend is a noop and `layer_split_front` is not set, the factory forces a large front count so all layers stay local.
+
+### Data Cache Configuration
+
+Multi‑tier caching wrapper around any base storage:
+- `cache_mode`: `none` | `only_mem` | `mem_and_ssd`
+- `mem_cache_capacity_bytes`: In‑memory LRU capacity
+- `enable_ssd_caching`: Backward‑compat flag (used when `cache_mode` omitted)
+- `ssd_cache_dir`: Path for SSD tier when enabled
+- Prefetch: `enable_prefetch`: True/False (prefetch lands into memory layer)
+
+Example (memory + SSD + prefetch):
+```json
+{"kv_transfer_config": {
+  "storage_type": "local",
+  "local_dir": "/data/kvcache",
+  "cache_mode": "mem_and_ssd",
+  "mem_cache_capacity_bytes": 536870912,
+  "ssd_cache_dir": "/data/ssd_cache",
+  "enable_prefetch": true
+}}
+```
 
 ## Usage
-
-### Basic Usage
 
 ```python
 from distributed_kv_manager import init_engine, destroy_engine
@@ -166,8 +239,6 @@ from distributed_kv_manager import should_store, store_kv, should_retrieve, retr
 # Initialize the engine
 engine = init_engine(config)
 
-# Check if we should store KV cache
-store_status = should_store(model_input)
 
 # Store KV cache if needed
 if store_status == StoreStatus.STORED:
@@ -202,10 +273,13 @@ Expired KV caches are automatically removed from both storage and metadata, free
 
 ### Testing
 
-Run the test suite to verify functionality:
-
+Run the test suite:
 ```bash
-python test_kv_engine.py
+python -m pytest
+```
+Focused:
+```bash
+python -m pytest tests/test_kv_engine.py -q
 ```
 
 ## API Reference
@@ -427,6 +501,40 @@ class StorageFactory:
 ```
 
 Tips
-- Ensure `file_path` is a relative key (factory/backends handle the base dir).
-- Keep `pack/unpack` stable across versions; shapes and dtypes must round-trip.
-- If you enable the SSD wrapper, the same `file_path` must work for upload/download/exists.
+- Ensure `file_path` is relative (factory/backends handle base paths)
+- Keep `pack/unpack` stable; shapes + dtypes must round‑trip
+- When wrapping with caching, identical keys must work across tiers
+- For composite, avoid mutating tensor layer order after split planning
+
+## Prefetch module layout
+
+The prefetch and IO aggregation logic now lives in a dedicated package:
+
+- Package: `distributed_kv_manager.prefetch`
+- Implementation: `distributed_kv_manager/prefetch/core.py`
+- Public API exported by the package `__init__.py`
+
+Import examples:
+
+```python
+from distributed_kv_manager.prefetch import (
+  PrefetchBuffer, BudgetEstimator, RateLimiter, IOAggregator, PlanBuilder,
+)
+```
+
+Note: the legacy top‑level module `distributed_kv_manager/prefetch.py` was removed.
+
+## Notes & Pitfalls
+
+- Always call `destroy_engine()` to stop cleanup + flush async tasks
+- Provide `session_id` (bytes) and `layer_id` (int) in `model_input` for stable keys
+- Remote path: prefer `remote_dir`; `crail_dir` only kept for backward compatibility
+- Prefetch is asynchronous; wait for futures or engine destroy before asserting hits in tests
+- If ETCD is unreachable, retrieval falls back to MISS and may log warnings
+
+## Roadmap (Future Enhancements)
+
+- Adaptive layer split based on access latency & hit rates
+- Dynamic prefetch budgeting (utilization feedback loop)
+- Extended telemetry export (prometheus hooks)
+- Additional remote backends (S3, NFS, OSS) via dynamic import

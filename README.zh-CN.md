@@ -1,11 +1,11 @@
 # 分布式KV管理器
 
-一个为大语言模型推理场景设计的分布式键值缓存管理器，用于高效存储和检索KV（键值）缓存。该系统提供了高性能的缓存功能，支持Crail和本地文件系统等多种分布式存储后端。
+一个面向大语言模型 (LLM) 推理场景的分布式键值 (KV) 缓存管理器：支持可插拔存储后端、复合分层存储（本地 + 远端）、内存 + SSD 两级数据缓存、ETCD 元数据与恢复、以及可选的预取 + I/O 聚合。
 
 ## 功能特性
 
 - **分布式KV缓存**：为LLM推理高效存储和检索KV缓存
-- **多种存储后端**：支持Crail和本地文件系统存储
+- **多种存储后端**：支持本地、Crail（可选）、以及自定义动态导入后端
 - **元数据管理**：使用ETCD进行强大的元数据管理，支持连接池和故障转移
 - **缓存层**：三层元数据缓存，提升性能
 - **异步操作**：基于线程池的非阻塞存储操作
@@ -14,13 +14,16 @@
 - **自动清理**：基于可配置过期时间自动清理过期的KV缓存
 - **元数据恢复**：能够从存储文件中恢复元数据
 - **增强日志**：详细的日志记录便于调试和监控
+ - **双层数据缓存（新增）**：支持内存缓存与SSD缓存，可选三种缓存模式：`none`、`only_mem`、`mem_and_ssd`
+ - **预取 + I/O 聚合（新增）**：窗口聚合 + 带宽预算；按层顺序的会话前视；预取优先落入内存
+ - **复合存储（新增）**：KV 按层拆分：前段本地、后段远端；下载自动合并
 
 ## 架构
 
-系统由以下几个关键组件构成：
+系统由以下组件构成：
 
 1. **KV引擎**：处理存储和检索操作的核心引擎
-2. **存储层**：抽象存储接口，支持Crail和本地存储实现
+2. **存储层**：抽象存储接口（本地 / Crail / 复合 / 自定义）
 3. **元数据管理器**：基于ETCD的元数据管理，支持连接池
 4. **元数据缓存**：三层缓存系统，提升元数据访问性能
 5. **存储工厂**：工厂模式，用于创建适当的存储后端
@@ -36,9 +39,11 @@
 - 在检索操作期间检查元数据过期
 
 #### 存储后端
-支持多种存储后端：
-- **Crail存储**：高性能分布式存储系统
-- **本地存储**：基于文件系统的本地存储，适用于开发/测试
+支持或可扩展的后端：
+- **LocalStorage**：文件系统参考实现
+- **CrailStorage**：高性能分布式存储（可选）
+- **CompositeStorage**：分层拆分 + 合并
+- **自定义后端**：通过动态类路径导入
 
 #### 元数据管理
 使用ETCD进行强大的元数据管理，具备：
@@ -149,10 +154,105 @@ from distributed_kv_manager import init_engine
 engine = init_engine()
 ```
 
-### 存储配置
+### 存储与缓存配置（基础）
 
-- **Crail存储**：设置`storage_type="crail"`并配置`crail_dir`
-- **本地存储**：设置`storage_type="local"`并配置`local_dir`
+存储类型：
+- `local`：仅本地
+- `crail`：Crail 分布式存储
+- `composite`：分层切分（本地 + 远端）
+
+分层拆分（`composite`）：
+- `layer_split_front`：前段层数（优先）
+- `layer_split_ratio`：比例（未设置前段层数时生效，默认 0.5）
+
+数据缓存：
+- `cache_mode`: `none` | `only_mem` | `mem_and_ssd`
+- `mem_cache_capacity_bytes`: 内存 LRU 容量（默认 256MB）
+- `enable_prefetch`: 预取 + 聚合（默认 true）
+- `ssd_cache_dir`: SSD 缓存目录（在 `mem_and_ssd` 或兼容旧模式下使用）
+- 兼容：未设置 `cache_mode` 时沿用旧字段 `enable_ssd_caching`
+
+远端后端抽象（在 `composite` 中）：
+- `remote_dir`：远端基路径（优先）；缺省回退 `crail_dir`
+- `remote_backend_type`：`crail` | `local` | `noop`/`none`/`placeholder` | 自定义类路径
+- `remote_backend_class`：完全限定类路径（优先级高于 `remote_backend_type`）
+占位远端（noop）场景下若未指定 `layer_split_front`，工厂会强制全部层落本地避免读取空后段。
+
+示例：
+
+1）仅内存缓存 + 预取
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "local",
+    "local_dir": "/kvcache",
+    "cache_mode": "only_mem",
+    "mem_cache_capacity_bytes": 536870912,
+    "enable_prefetch": true
+  }
+}
+```
+
+2）内存 + SSD 两级缓存 + 预取
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "local",
+    "local_dir": "/kvcache",
+    "cache_mode": "mem_and_ssd",
+    "ssd_cache_dir": "/tmp/ssd_cache",
+    "mem_cache_capacity_bytes": 1073741824,
+    "enable_prefetch": true
+  }
+}
+```
+
+3）复合存储（按层拆分） + 两级缓存（使用旧字段 crail_dir，兼容）
+4）复合存储 + 占位远端（开发调试）
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "composite",
+    "local_dir": "/kvcache_local",
+    "remote_dir": "/unused/remote",
+    "remote_backend_type": "noop",
+    "layer_split_ratio": 0.5
+  }
+}
+```
+
+5）复合存储 + 自定义远端类
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "composite",
+    "local_dir": "/kvcache_local",
+    "remote_dir": "/remote/kvcache",
+    "remote_backend_class": "my_pkg.backends.MyRemoteStorage",
+    "layer_split_front": 16
+  }
+}
+```
+
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "composite",
+    "local_dir": "/kvcache_local",
+    "crail_dir": "/crail/kvcache",
+    "layer_split_front": 20,
+    "cache_mode": "mem_and_ssd",
+    "ssd_cache_dir": "/tmp/ssd_cache",
+    "mem_cache_capacity_bytes": 1073741824,
+    "enable_prefetch": true
+  }
+}
+```
+
+说明：
+- 未指定 `layer_split_front` 时使用 `layer_split_ratio`（默认 0.5）
+- 预取结果在 `only_mem` 与 `mem_and_ssd` 模式下都会优先落入内存缓存
+- 推荐新配置使用 `remote_dir`，旧的 `crail_dir` 保留兼容
 
 ## 使用方法
 
@@ -201,11 +301,18 @@ config.kv_transfer_config = SimpleNamespace(
 
 ### 测试
 
-运行测试套件以验证功能：
-
+运行测试套件：
 ```bash
-python test_kv_engine.py
+python -m pytest
 ```
+聚焦单文件：
+```bash
+python -m pytest tests/test_kv_engine.py -q
+```
+
+附加说明（新增能力）：
+- 预取与 I/O 聚合在缓存包装启用后后台运行；不修改 ETCD 元数据
+- 复合存储对引擎透明：ETCD 仍记录逻辑文件键，物理拆分在内部完成
 
 ## API参考
 
@@ -426,3 +533,36 @@ Tips
 - 确保 `file_path` 为相对键（基目录由后端/工厂拼接）。
 - 保证 `pack/unpack` 的兼容性：形状与 dtype 必须能无损还原。
 - 启用 SSD 包裹时，`upload/download/exists` 要保持对同一 `file_path` 的一致语义。
+
+## 预取组件结构（Prefetch）
+
+预取与 I/O 聚合逻辑已独立为一个包：
+
+- 包路径：`distributed_kv_manager.prefetch`
+- 实现文件：`distributed_kv_manager/prefetch/core.py`
+- 公共 API：通过包的 `__init__.py` 统一导出
+
+导入示例：
+
+```python
+from distributed_kv_manager.prefetch import (
+  PrefetchBuffer, BudgetEstimator, RateLimiter, IOAggregator, PlanBuilder,
+)
+```
+
+注意：旧的顶层模块 `distributed_kv_manager/prefetch.py` 已移除，请改用上述包路径。
+
+## 注意事项 
+
+- 使用 `destroy_engine()` 结束：确保后台清理与异步写任务退出
+- 提供稳定键：`session_id` (bytes) + `layer_id` (int) 必须在 `model_input` 中
+- 远端路径优先 `remote_dir`；仅当需要兼容旧配置时使用 `crail_dir`
+- 占位远端(noop) 不会真正持久化数据，适合本地验证流程
+- ETCD 不可达时：检索自动 MISS，并可能输出日志警告
+
+## 路线图
+
+- 自适应层拆分（基于延迟与命中率）
+- 动态预取预算调节（利用率反馈）
+- 远端后端扩展（S3 / NFS / 对象存储）
+- Telemetry 指标暴露（Prometheus 集成）
