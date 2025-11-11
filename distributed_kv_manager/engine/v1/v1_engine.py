@@ -106,7 +106,6 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         self._req_slot_mapping = {}
         # 保存当前步骤构造的元数据供 worker 使用
         self._current_metadata = None
-        # chunk 大小（按 LMCache 语义）用于决定保存时机；默认 256，可由 kv_transfer_config.chunk_size 覆盖
         try:
             self._chunk_size = int(getattr(getattr(vllm_config, 'kv_transfer_config', None), 'chunk_size', 256) or 256)
         except Exception:
@@ -136,7 +135,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         # 持有 forward_context 供后续 wait_for_save 使用
         self._last_forward_context = forward_context
         # 使用构建好的 metadata 中的 load_spec 执行检索
-        meta = self._current_metadata
+        try:
+            meta = self._get_connector_metadata()
+        except Exception:
+            meta = self._current_metadata
         if meta is None:
             return
         self._logger.debug("[v1_engine] start_load_kv: meta.requests=%d", len(meta.requests))
@@ -165,7 +167,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             fc = self._last_forward_context
             if fc is None:
                 return
-            meta = self._current_metadata
+            try:
+                meta = self._get_connector_metadata()
+            except Exception:
+                meta = self._current_metadata
             if meta is None:
                 return
             for rm in meta.requests:

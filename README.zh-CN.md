@@ -374,16 +374,29 @@ nohup ./etcd \
 - 然后使用本连接器启动 vLLM 的 OpenAI 兼容服务（v0 接口）：
 
 ```bash
-VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+python3 vllm_adapter/vllm_start_with_inject.py \
   --model /tmp/ckpt/Qwen --port 8100 --max-model-len 10000 \
   --gpu-memory-utilization 0.8 \
   --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
 
-VLLM_USE_V1=0 python3 -m vllm.entrypoints.openai.api_server \
+python3 vllm_adapter/vllm_start_with_inject.py \
   --model /tmp/ckpt/Qwen3-0.6B --port 8100 --max-model-len 10000 \
   --gpu-memory-utilization 0.8 \
   --kv-transfer-config '{"kv_connector":"DistributedKVConnector","kv_role":"kv_both"}'
 ```
+
+- 或者直接使用 v1 接口启动（无需注入脚本）：
+
+```bash
+python3 -m vllm.entrypoints.openai.api_server \
+  --model /tmp/ckpt/Qwen3-0.6B --port 8100 --max-model-len 10000 \
+  --gpu-memory-utilization 0.8 \
+  --kv-transfer-config '{"kv_connector":"DKVOffloadingConnector","kv_connector_module_path":"distributed_kv_manager.vllm_adapter.dkv_offloading_connector_v1","kv_role":"kv_both"}'
+```
+
+说明：`kv_connector_module_path` 用于强制 vLLM 从
+`distributed_kv_manager.vllm_adapter.dkv_offloading_connector_v1` 导入连接器，
+即使 vLLM 内部已有同名连接器也不会冲突。若非编辑模式或存在多版本混用，建议保留。
 
 - 基础请求测试：
 

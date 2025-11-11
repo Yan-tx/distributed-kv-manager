@@ -143,13 +143,8 @@ class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
         return self._core.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        # 将 forward_context 注入 engine 核心，返回最小元数据（空计划）
-        try:
-            self._core.build_connector_meta(scheduler_output)
-        except Exception:
-            # 忽略引擎内部的处理错误，保持调度方继续
-            pass
-        return DKVOffloadingConnectorMetadata(reqs_to_store={}, reqs_to_load={})
+        # 直接返回核心实现构建的元数据，供 vLLM 调度器传递到 worker
+        return self._core.build_connector_meta(scheduler_output)
 
     def update_connector_output(self, connector_output: Any):
         # 目前无状态需要更新，保持空实现
@@ -160,6 +155,26 @@ class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
 
     def take_events(self):
         return self._core.take_events()
+
+    # --- Metadata binding bridge ---
+    # vLLM 会在适配器上绑定/清理 metadata；这里转发到核心，使 worker 侧核心可读取。
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        try:
+            self._core.bind_connector_metadata(connector_metadata)  # type: ignore[arg-type]
+        except Exception:
+            # 兜底：保存在适配器上
+            super().bind_connector_metadata(connector_metadata)
+
+    def clear_connector_metadata(self) -> None:
+        try:
+            self._core.clear_connector_metadata()
+        except Exception:
+            pass
+
+    # vLLM 生命周期钩子：与 close 等价，供框架统一调用
+    def shutdown(self) -> None:
+        self.close()
+        super().clear_connector_metadata()
 
     def close(self):  # noqa: D401
         try:
