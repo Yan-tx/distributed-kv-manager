@@ -109,7 +109,9 @@ class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig | None = None,
     ):
-        super().__init__(vllm_config, role, kv_cache_config)
+        # vLLM v1 (e.g., 0.9.2) base connector __init__ often takes (config, role) only.
+        # Pass only the first two to remain compatible; keep kv_cache_config for forward-compat.
+        super().__init__(vllm_config, role)
         self.vllm_config = vllm_config
         self.role = role
         self._engine = init_engine(vllm_config)
