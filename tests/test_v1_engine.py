@@ -47,6 +47,8 @@ class _VLLMConfig:
             chunk_size=8,
             force_sync_store=True,
             engine_id="v1_test_session",
+            # 传递一个临时 config_path 防止默认 config.json 覆盖我们测试的storage_dir
+            config_path=None,
         )
         # placeholders required by store_kv signature
         self.model_config = SimpleNamespace()
@@ -86,6 +88,23 @@ def test_v1_engine_roundtrip_full_hit():
 
     with tempfile.TemporaryDirectory() as temp_dir:
         vcfg = _VLLMConfig(temp_dir)
+        # 写入覆盖用的 config.json 到临时路径，避免项目根的 config.json 覆盖本测试参数
+        import json, os
+        tmp_cfg_path = os.path.join(temp_dir, "config.json")
+        with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "kv_transfer_config": {
+                    "storage_type": "local",
+                    "local_dir": temp_dir,
+                    "storage_dir": temp_dir,
+                    "etcd_endpoints": ["127.0.0.1:2379"],
+                    "enable_ssd_caching": False,
+                    "enable_prefetch": False,
+                    "chunk_size": 8,
+                    "engine_id": "v1_test_session"
+                }
+            }, f)
+        vcfg.kv_transfer_config.config_path = tmp_cfg_path
 
         # build v1 engine instance
         core = init_v1_engine(vcfg)
@@ -120,7 +139,18 @@ def test_v1_engine_roundtrip_full_hit():
         # simulate compute completion for prefill
         req.num_computed_tokens = len(tokens)
         # trigger save
+        # 触发保存（前缀完整）
         core.wait_for_save()
+        # 强制等待底层 futures 完成，确保文件已写入再重建引擎
+        try:
+            engine = core._engine  # type: ignore[attr-defined]
+            for f in list(getattr(engine, '_futures', []) or []):
+                try:
+                    f.result(timeout=20)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # reconstruct engine and perform retrieval into zero buffers
         destroy_v1_engine()
@@ -135,8 +165,15 @@ def test_v1_engine_roundtrip_full_hit():
         # second request: same tokens, expect full hit minus last token allocation
         req2 = _Request("req2", tokens)
         need, can_load = core.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+        # should_retrieve 直接调用底层构造的 model_input 验证命中
+        from distributed_kv_manager.engine import should_retrieve as _should
+        mi2 = core._build_model_input(SimpleNamespace(model=req2.model), req2, None)  # type: ignore
+        hit_status = _should(mi2)
         assert can_load is True
         assert need == max(0, len(tokens) - 1)
+        # HIT 枚举值验证（RetrieveStatus.HIT）
+        from distributed_kv_manager.engine import RetrieveStatus as _RS
+        assert hit_status == _RS.HIT
 
         core.update_state_after_alloc(req2, None, need)
         num_sched2 = {req2.request_id: len(tokens)}
@@ -150,10 +187,20 @@ def test_v1_engine_roundtrip_full_hit():
         )
         core.build_connector_meta(sched2)
         core.start_load_kv(fc2)
+        # 再次等待可能的读取后写入（虽然 retrieve 是同步）
+        try:
+            engine2 = core._engine  # type: ignore[attr-defined]
+            for f in list(getattr(engine2, '_futures', []) or []):
+                try:
+                    f.result(timeout=10)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # verify caches have been filled to match original
         for i in range(num_layers):
             name = f"layer_{i}"
             assert torch.allclose(zero_kvs[name], orig_kvs[name], atol=1e-6)
 
-        destroy_v1_engine()
+    destroy_v1_engine()

@@ -84,7 +84,12 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         except Exception:  # pragma: no cover
             self._logger = logging.getLogger(self.__class__.__name__)
         # 初始化底层存储/元数据引擎（复用既有实现）
-        self._engine = init_engine(vllm_config)
+        # 若 vllm_config.kv_transfer_config.config_path 存在，则传递以确保测试/自定义配置覆盖默认config.json
+        try:
+            cfg_path = getattr(getattr(vllm_config, 'kv_transfer_config', None), 'config_path', None)
+        except Exception:
+            cfg_path = None
+        self._engine = init_engine(vllm_config, config_path=cfg_path)
         # 运行时状态
         self._kv_caches: Dict[str, torch.Tensor] = {}
         self._last_forward_context: Any = None
