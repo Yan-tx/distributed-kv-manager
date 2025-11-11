@@ -152,10 +152,10 @@ def test_v1_engine_roundtrip_full_hit():
         except Exception:
             pass
         # 验证物理文件是否存在
-        import hashlib, os
+        import os
         t = torch.tensor(tokens, dtype=torch.long)
-        seq_hash = hashlib.blake2b(t.cpu().numpy().tobytes()).hexdigest()
-        fname = f"kv_v1_test_session_layer_0_{seq_hash}.pt"
+        # 使用实际引擎的 _make_key 生成期望文件名，避免与内部哈希长度策略不一致
+        fname = engine._make_key(t, session_id=b"v1_test_session", layer_id=0)  # type: ignore[attr-defined]
         full_path = os.path.join(temp_dir, fname)
         assert os.path.exists(full_path), f"expected saved file missing: {full_path}"
 

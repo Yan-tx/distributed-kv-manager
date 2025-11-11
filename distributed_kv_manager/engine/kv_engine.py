@@ -984,7 +984,12 @@ class KVEngine(DistributedKVEngineBase):
         if tensor.numel() == 0:
             return "empty"
         tensor_bytes = tensor.cpu().numpy().tobytes()
-        return hashlib.blake2b(tensor_bytes).hexdigest()
+        # 默认 blake2b 输出 64 bytes -> 128 hex chars，会导致文件名过长（>128字节时
+        # KVMetadata 打包的 128B file_path 字段被截断，进而产生两个 key：完整 key 与
+        # 被截断的 key，影响后续命中与检索（见 issue: v1 roundtrip 文件存在但检索 miss）。
+        # 为避免截断，这里缩短 digest_size；16 bytes(32 hex) 可能碰撞率略高，折中取 24 bytes(48 hex)。
+        # 这样典型文件名长度: prefix(~25)+48+".pt"≈76 < 128，不会被截断。
+        return hashlib.blake2b(tensor_bytes, digest_size=24).hexdigest()
 
     def _make_key(
         self,
