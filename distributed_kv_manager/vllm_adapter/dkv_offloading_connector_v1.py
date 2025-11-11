@@ -102,281 +102,68 @@ class DKVOffloadingConnectorMetadata(KVConnectorMetadata):  # type: ignore[misc]
     reqs_to_load: dict[str, list[DKVTransferItem]]
 
 
-class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
-    ):
-        # vLLM v1 (e.g., 0.9.2) base connector __init__ often takes (config, role) only.
-        # Pass only the first two to remain compatible; keep kv_cache_config for forward-compat.
-        super().__init__(vllm_config, role)
-        self.vllm_config = vllm_config
-        # 基类可能已设置只读属性 role，这里避免重复赋值导致 AttributeError
-        try:
-            if getattr(self, "role", None) is None:
-                object.__setattr__(self, "role", role)  # fall back if writable
-        except Exception:
-            pass
-        self._engine = init_engine(vllm_config)
-        self._logger = logging.getLogger(self.__class__.__name__)
-        self._logger.info("DKVOffloadingConnector initialized (role=%s)", role.name)
-        self._requests: dict[str, Request] = {}
-        self._request_block_ids: dict[str, list[int]] = {}
-        self._planned_end_token: dict[str, int] = {}
+from distributed_kv_manager.engine.v1 import init_v1_engine, destroy_v1_engine
+from distributed_kv_manager.engine.v1.v1_engine import V1KVEngineImpl
 
+
+class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
+    """超薄连接器：所有逻辑均委托给 engine.v1.V1KVEngineImpl。"""
+
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):  # noqa: D401,E501
+        super().__init__(vllm_config, role)
+        self._logger = logging.getLogger(self.__class__.__name__)
+        # 在 engine 层创建核心实现，并由本类1:1转发
+        self._core: V1KVEngineImpl = init_v1_engine(vllm_config, role)
+        self._logger.info("DKVOffloadingConnector(thin) forwarding to engine.v1 core, role=%s", getattr(role, "name", "?"))
+
+    # Worker-side -------------------------------------------------------
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        pass
+        return self._core.register_kv_caches(kv_caches)
 
     def start_load_kv(self, forward_context: Any, **kwargs) -> None:
-        meta = self._ensure_worker_meta()
-        if not meta.reqs_to_load:
-            return
-        for req_id, _items in meta.reqs_to_load.items():
-            try:
-                req = forward_context.requests.get(req_id)
-                if req is None:
-                    continue
-                self._engine_should_retrieve_and_retrieve_full(forward_context, req)
-            except Exception:
-                self._logger.exception("load_kv failed for req=%s", req_id)
+        return self._core.start_load_kv(forward_context, **kwargs)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        return
+        return self._core.wait_for_layer_load(layer_name)
 
-    def save_kv_layer(
-        self,
-        layer_name: str,
-        kv_layer: torch.Tensor,
-        attn_metadata: Any,
-        **kwargs,
-    ) -> None:
-        return
+    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: Any, **kwargs) -> None:
+        return self._core.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
     def wait_for_save(self) -> None:
-        meta = self._ensure_worker_meta()
-        if not meta.reqs_to_store:
-            return
-        try:
-            fc = self._last_forward_context
-        except Exception:
-            fc = None
-        for req_id, items in meta.reqs_to_store.items():
-            try:
-                if fc is None:
-                    continue
-                req = fc.requests.get(req_id)
-                if req is None:
-                    continue
-                for it in items:
-                    self._engine_store_slice(fc, req, it.start_token, it.end_token)
-            except Exception:
-                self._logger.exception("wait_for_save store failed for req=%s", req_id)
+        return self._core.wait_for_save()
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        return set(finished_req_ids), set()
+        return self._core.get_finished(finished_req_ids)
 
-    def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
-        return 0, False
+    # Scheduler-side ----------------------------------------------------
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:  # noqa: E501
+        return self._core.get_num_new_matched_tokens(request, num_computed_tokens)
 
-    def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ):
-        self._requests[request.request_id] = request
-        block_groups = blocks.get_block_ids()
-        block_ids = block_groups[0]
-        self._request_block_ids[request.request_id] = block_ids
+    def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):  # noqa: E501
+        return self._core.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        reqs_to_store: dict[str, list[DKVTransferItem]] = {}
-        reqs_to_load: dict[str, list[DKVTransferItem]] = {}
-
-        for req_data in scheduler_output.scheduled_new_reqs:
-            req_id = req_data.req_id
-            req = self._requests.get(req_id)
-            if req is None:
-                continue
-            new_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
-            if new_tokens <= 0:
-                continue
-            prev_end = self._planned_end_token.get(req_id, 0)
-            end_tok = req.num_computed_tokens + new_tokens
-            if end_tok > prev_end:
-                reqs_to_store.setdefault(req_id, []).append(
-                    DKVTransferItem(req_id, prev_end, end_tok)
-                )
-                self._planned_end_token[req_id] = end_tok
-
-        def _flatten_block_ids(group) -> list[int]:
-            # Accept shapes like [int,...] or [(list[int]), ...]
-            if group is None:
-                return []
-            # If it's already a flat list of ints
-            if isinstance(group, (list, tuple)) and (len(group) == 0 or isinstance(group[0], int)):
-                return list(group)
-            # Otherwise, flatten nested lists/tuples
-            out: list[int] = []
-            try:
-                for sub in group:
-                    if isinstance(sub, (list, tuple)):
-                        out.extend(int(x) for x in sub)
-                    else:
-                        out.append(int(sub))
-            except Exception:
-                pass
-            return out
-
-        cached = scheduler_output.scheduled_cached_reqs
-        for idx, req_id in enumerate(cached.req_ids):
-            req = self._requests.get(req_id)
-            if req is None:
-                continue
-            new_block_id_groups = cached.new_block_ids[idx]
-            # 安全获取 gpu_block_size，兼容不同 vLLM 结构
-            gpu_bs = 16
-            vc = getattr(self.vllm_config, "v1_config", None)
-            if vc is not None:
-                gpu_bs = getattr(vc, "gpu_block_size", gpu_bs)
-            else:
-                gpu_bs = getattr(self.vllm_config, "gpu_block_size", gpu_bs)
-            flat_block_ids = _flatten_block_ids(new_block_id_groups)
-            if not flat_block_ids:
-                continue
-            min_blk = min(flat_block_ids)
-            max_blk = max(flat_block_ids)
-            start_tok = min_blk * gpu_bs
-            end_tok = (max_blk + 1) * gpu_bs
-            prev_end = self._planned_end_token.get(req_id, 0)
-            if end_tok > prev_end:
-                reqs_to_store.setdefault(req_id, []).append(
-                    DKVTransferItem(req_id, max(prev_end, start_tok), end_tok)
-                )
-                self._planned_end_token[req_id] = end_tok
-
-        meta = DKVOffloadingConnectorMetadata(
-            reqs_to_store=reqs_to_store,
-            reqs_to_load=reqs_to_load,
-        )
+        # 将 forward_context 注入 engine 核心，返回最小元数据（空计划）
         try:
-            self._last_forward_context = scheduler_output.forward_context
+            self._core.build_connector_meta(scheduler_output)
         except Exception:
-            self._last_forward_context = None
-        self._connector_metadata = meta
-        return meta
-
-    def update_connector_output(self, connector_output: Any):
-        return
-
-    def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
-    ) -> tuple[bool, dict[str, Any] | None]:
-        req_id = request.request_id
-        self._requests.pop(req_id, None)
-        self._request_block_ids.pop(req_id, None)
-        self._planned_end_token.pop(req_id, None)
-        return False, None
-
-    def take_events(self):
-        return []
-
-    def _engine_should_retrieve_and_retrieve_full(self, fc: Any, req: "Request"):
-        mi = SimpleNamespace()
-        input_ids = getattr(req, "input_ids", None)
-        if input_ids is None:
-            return
-        if not torch.is_tensor(input_ids):
-            input_tokens = torch.tensor(input_ids, dtype=torch.long, device=self._infer_device(fc))
-        else:
-            input_tokens = input_ids
-        mi.input_tokens = input_tokens
-        sa = SimpleNamespace()
-        sa.seq_lens = [int(input_tokens.shape[0])]
-        sa.slot_mapping = torch.arange(sa.seq_lens[0], device=input_tokens.device)
-        try:
-            sid = str(getattr(req, "request_id", "v1_session")).encode("utf-8")
-        except Exception:
-            sid = b"v1_session"
-        mi.session_id = sid
-        mi.layer_id = 0
-        kv_caches = self._collect_kv_caches(fc)
-        rs = should_retrieve(mi)
-        retrieve_kv(fc.model, mi, kv_caches, rs)
-
-    def _engine_store_slice(self, fc: Any, req: "Request", start_tok: int, end_tok: int):
-        if end_tok <= start_tok:
-            return
-        input_ids = getattr(req, "input_ids", None)
-        if input_ids is None:
-            return
-        dev = self._infer_device(fc)
-        if not torch.is_tensor(input_ids):
-            full_tokens = torch.tensor(input_ids, dtype=torch.long, device=dev)
-        else:
-            full_tokens = input_ids
-        curr_tokens = full_tokens[start_tok:end_tok]
-        seq_len = int(curr_tokens.shape[0])
-        mi = SimpleNamespace()
-        mi.input_tokens = curr_tokens
-        sa = SimpleNamespace()
-        sa.seq_lens = [seq_len]
-        sa.slot_mapping = torch.arange(seq_len, device=dev)
-        mi.attn_metadata = sa
-        try:
-            sid = str(getattr(req, "request_id", "v1_session")).encode("utf-8")
-        except Exception:
-            sid = b"v1_session"
-        mi.session_id = sid
-        mi.layer_id = 0
-        mi.payload_meta = {"token_offset": int(start_tok), "block_size": int(seq_len)}
-        kv_caches = self._collect_kv_caches(fc, span=(start_tok, end_tok))
-        ss = should_store(mi)
-        store_kv(self.vllm_config.model_config, self.vllm_config.parallel_config, None, fc.model, mi, kv_caches, ss, None)
-
-    def _ensure_worker_meta(self) -> DKVOffloadingConnectorMetadata:
-        meta = getattr(self, "_connector_metadata", None)
-        if isinstance(meta, DKVOffloadingConnectorMetadata):
-            return meta
+            # 忽略引擎内部的处理错误，保持调度方继续
+            pass
         return DKVOffloadingConnectorMetadata(reqs_to_store={}, reqs_to_load={})
 
-    def _collect_kv_caches(self, fc: Any, span: tuple[int, int] | None = None) -> list[torch.Tensor]:
-        try:
-            caches_by_layer = fc.kv_caches
-            tensors = list(caches_by_layer.values())
-            if span is None:
-                return tensors
-            start, end = span
-            out = []
-            for t in tensors:
-                try:
-                    k = t[0]
-                    v = t[1]
-                    if k.dim() == 4:
-                        out.append(torch.stack([k[0:1, start:end].contiguous(), v[0:1, start:end].contiguous()], dim=0))
-                    elif k.dim() == 3:
-                        out.append(torch.stack([k[start:end].contiguous(), v[start:end].contiguous()], dim=0))
-                    else:
-                        out.append(t)
-                except Exception:
-                    out.append(t)
-            return out
-        except Exception:
-            return []
+    def update_connector_output(self, connector_output: Any):
+        # 目前无状态需要更新，保持空实现
+        return
 
-    def _infer_device(self, fc: Any) -> torch.device:
-        try:
-            device = next(fc.model.parameters()).device
-        except Exception:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        return device
+    def request_finished(self, request: "Request", block_ids: list[int]) -> tuple[bool, dict[str, Any] | None]:  # noqa: E501
+        return self._core.request_finished(request, block_ids)
 
-    def close(self):
+    def take_events(self):
+        return self._core.take_events()
+
+    def close(self):  # noqa: D401
         try:
-            destroy_engine()
+            destroy_v1_engine()
         except Exception:
             pass
 
