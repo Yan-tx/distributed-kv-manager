@@ -113,7 +113,12 @@ class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
         # Pass only the first two to remain compatible; keep kv_cache_config for forward-compat.
         super().__init__(vllm_config, role)
         self.vllm_config = vllm_config
-        self.role = role
+        # 基类可能已设置只读属性 role，这里避免重复赋值导致 AttributeError
+        try:
+            if getattr(self, "role", None) is None:
+                object.__setattr__(self, "role", role)  # fall back if writable
+        except Exception:
+            pass
         self._engine = init_engine(vllm_config)
         self._logger = logging.getLogger(self.__class__.__name__)
         self._logger.info("DKVOffloadingConnector initialized (role=%s)", role.name)
@@ -211,10 +216,13 @@ class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
             if req is None:
                 continue
             new_block_ids_tuple = cached.new_block_ids[idx]
-            try:
-                gpu_bs = self.vllm_config.v1_config.gpu_block_size
-            except Exception:
-                gpu_bs = getattr(self.vllm_config, "gpu_block_size", 16)
+            # 安全获取 gpu_block_size，兼容不同 vLLM 结构
+            gpu_bs = 16
+            vc = getattr(self.vllm_config, "v1_config", None)
+            if vc is not None:
+                gpu_bs = getattr(vc, "gpu_block_size", gpu_bs)
+            else:
+                gpu_bs = getattr(self.vllm_config, "gpu_block_size", gpu_bs)
             if not new_block_ids_tuple:
                 continue
             min_blk = min(new_block_ids_tuple)
