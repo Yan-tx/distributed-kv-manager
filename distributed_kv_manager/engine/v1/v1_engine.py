@@ -129,17 +129,14 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         # 使用构建好的 metadata 中的 load_spec 执行检索
         meta = self._current_metadata
         if meta is None:
-            print("[v1_engine/PRINT] start_load_kv: no metadata present")
             return
-        self._logger.info("[v1_engine] start_load_kv: meta.requests=%d", len(meta.requests))
-        print(f"[v1_engine/PRINT] start_load_kv using metadata; reqs={len(meta.requests)}")
+        self._logger.debug("[v1_engine] start_load_kv: meta.requests=%d", len(meta.requests))
         for rm in meta.requests:
             ls = rm.load_spec
             if ls is None or not ls.can_load:
                 continue
             # 当前实现仅支持全量命中时的加载（kv_engine 只对完整 token 序列命中）
-            self._logger.info("[v1_engine] load req=%s cached_tokens=%d vllm_cached=%d", rm.req_id, ls.cached_tokens, ls.vllm_cached_tokens)
-            print(f"[v1_engine/PRINT] load attempt req={rm.req_id} cached={ls.cached_tokens} vllm_cached={ls.vllm_cached_tokens}")
+            self._logger.debug("[v1_engine] load req=%s cached_tokens=%d vllm_cached=%d", rm.req_id, ls.cached_tokens, ls.vllm_cached_tokens)
             # 如果 vLLM 已有部分（num_computed_tokens>0）则不再检索
             if ls.vllm_cached_tokens == 0 and ls.cached_tokens > 0:
                 # 构造一个伪 request 对象：从 unfinished map 获取原始
@@ -158,13 +155,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         try:
             fc = self._last_forward_context
             if fc is None:
-                print("[v1_engine/PRINT] wait_for_save: no forward_context captured")
                 return
             meta = self._current_metadata
             if meta is None:
-                print("[v1_engine/PRINT] wait_for_save: no metadata")
                 return
-            print(f"[v1_engine/PRINT] wait_for_save called; meta_reqs={len(meta.requests)}")
             for rm in meta.requests:
                 req = self._unfinished_requests.get(rm.req_id)
                 if req is None:
@@ -177,8 +171,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 boundary = (prev // self._chunk_size + 1) * self._chunk_size
                 should_flush = rm.is_last_prefill or total_tokens >= boundary
                 if should_flush and total_tokens > prev:
-                    self._logger.info("[v1_engine] store req=%s span=[%d,%d) last_prefill=%s", rm.req_id, prev, total_tokens, rm.is_last_prefill)
-                    print(f"[v1_engine/PRINT] store flush req={rm.req_id} prev={prev} total={total_tokens} last={rm.is_last_prefill}")
+                    self._logger.debug("[v1_engine] store req=%s span=[%d,%d) last_prefill=%s", rm.req_id, prev, total_tokens, rm.is_last_prefill)
                     self._store_slice(fc, req, prev, total_tokens)
                     self._req_last_stored[rm.req_id] = total_tokens
             # 可选：同步等待写入完成，方便立即看到落盘
@@ -189,8 +182,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 force_sync = False
             if force_sync:
                 futures = list(getattr(self._engine, "_futures", []) or [])
-                self._logger.info("[v1_engine] force_sync_store waiting %d futures", len(futures))
-                print(f"[v1_engine/PRINT] force_sync_store waiting futures={len(futures)}")
+                self._logger.debug("[v1_engine] force_sync_store waiting %d futures", len(futures))
                 for f in futures:
                     try:
                         f.result(timeout=10)
@@ -323,10 +315,8 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         if not kvs:
             self._logger.warning("[v1_engine] retrieve: no kv_caches available (registered=%d fc_has=%s)",
                                  len(self._kv_caches), hasattr(fc, "kv_caches"))
-            print(f"[v1_engine/PRINT] retrieve_full: NO kv_caches registered={len(self._kv_caches)} fc_has_kv={hasattr(fc,'kv_caches')}")
         retrieve_kv(fc.model, mi, kvs, rs)
-        self._logger.info("[retrieve] req=%s tokens=%d", getattr(req, "request_id", "?"), mi.input_tokens.shape[0])
-        print(f"[v1_engine/PRINT] retrieve_full done req={getattr(req,'request_id','?')} tokens={mi.input_tokens.shape[0]} kv_layers={len(kvs)}")
+        self._logger.debug("[retrieve] req=%s tokens=%d", getattr(req, "request_id", "?"), mi.input_tokens.shape[0])
 
     def _store_slice(self, fc: Any, req: Any, start: int, end: int) -> None:
         if end <= start:
@@ -338,10 +328,8 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         kvs = self._collect_kv(fc, (start, end))
         if not kvs:
             self._logger.warning("[v1_engine] store: no kv_caches to persist for req=%s span=[%d,%d)", getattr(req, "request_id", "?"), start, end)
-            print(f"[v1_engine/PRINT] store_slice: NO kv_caches req={getattr(req,'request_id','?')} span=[{start},{end})")
         store_kv(self.vllm_config.model_config, self.vllm_config.parallel_config, None, fc.model, mi, kvs, ss, None)
-        self._logger.info("[store] req=%s span=[%d,%d) len=%d", getattr(req, "request_id", "?"), start, end, end-start)
-        print(f"[v1_engine/PRINT] store_slice done req={getattr(req,'request_id','?')} span=[{start},{end}) len={end-start} kv_layers={len(kvs)}")
+        self._logger.debug("[store] req=%s span=[%d,%d) len=%d", getattr(req, "request_id", "?"), start, end, end-start)
 
     def _build_model_input(self, fc: Any, req: Any, span: Optional[Tuple[int, int]]) -> Optional[SimpleNamespace]:
         inp = getattr(req, "input_ids", None)
