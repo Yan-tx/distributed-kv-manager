@@ -141,3 +141,9 @@ KVConnectorFactory.register_connector(
     "DistributedKVConnector",
     "vllm.distributed.kv_transfer.kv_connector.distributed_kv_connector",
     "DistributedKVConnector")
+
+# Distributed KV Manager v1 offloading connector 
+KVConnectorFactory.register_connector(
+    "DKVOffloadingConnector",
+    "distributed_kv_manager.vllm_adapter.dkv_offloading_connector_v1",
+    "DKVOffloadingConnector")

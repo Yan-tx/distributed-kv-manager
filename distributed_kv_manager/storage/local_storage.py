@@ -24,8 +24,14 @@ class LocalStorage(AbstractStorage):
             
             with open(full_path, 'wb') as f:
                 f.write(data)
-                
-            logger.debug(f"Successfully uploaded data to {full_path}")
+            # 追加完整路径长度与存在性校验，便于后续排查截断或挂载问题
+            exists_flag = os.path.exists(full_path)
+            logger.debug(
+                "Successfully uploaded data to %s (exists=%s, path_len=%d)",
+                full_path,
+                exists_flag,
+                len(full_path),
+            )
             return True
         except Exception as e:
             logger.error(f"Failed to upload data to {file_path}: {e}")
@@ -35,10 +41,20 @@ class LocalStorage(AbstractStorage):
         """从本地文件系统下载数据"""
         try:
             full_path = os.path.join(self.local_dir, file_path)
-            logger.debug(f"尝试下载文件: {full_path}")
+            # 若路径超长，分段打印，避免某些终端截断末尾
+            if len(full_path) > 160:
+                segmented = [full_path[i:i+120] for i in range(0, len(full_path), 120)]
+                logger.debug("尝试下载文件(分段):\n%s", "\n".join(segmented))
+            else:
+                logger.debug(f"尝试下载文件: {full_path}")
             
             if not os.path.exists(full_path):
-                logger.warning(f"文件不存在: {full_path}")
+                logger.warning(
+                    "文件不存在: %s (path_len=%d, local_dir=%s)",
+                    full_path,
+                    len(full_path),
+                    self.local_dir,
+                )
                 return None
                 
             with open(full_path, 'rb') as f:
