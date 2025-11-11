@@ -47,7 +47,7 @@ class _VLLMConfig:
             chunk_size=8,
             force_sync_store=True,
             engine_id="v1_test_session",
-            # 传递一个临时 config_path 防止默认 config.json 覆盖我们测试的storage_dir
+            # 传递一个临时 config_path 防止默认 config.json 覆盖测试的storage_dir
             config_path=None,
         )
         # placeholders required by store_kv signature
@@ -151,6 +151,13 @@ def test_v1_engine_roundtrip_full_hit():
                     pass
         except Exception:
             pass
+        # 验证物理文件是否存在
+        import hashlib, os
+        t = torch.tensor(tokens, dtype=torch.long)
+        seq_hash = hashlib.blake2b(t.cpu().numpy().tobytes()).hexdigest()
+        fname = f"kv_v1_test_session_layer_0_{seq_hash}.pt"
+        full_path = os.path.join(temp_dir, fname)
+        assert os.path.exists(full_path), f"expected saved file missing: {full_path}"
 
         # reconstruct engine and perform retrieval into zero buffers
         destroy_v1_engine()
