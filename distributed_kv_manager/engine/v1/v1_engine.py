@@ -87,8 +87,9 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             self._logger.exception("wait_for_save unexpected failure")
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        # 同步实现：立即完成
-        return finished_req_ids, set()
+        # 同步实现且不占用异步队列：不要回传任何已完成ID
+        # 否则调度器会尝试对未登记的请求做二次释放，触发 KeyError。
+        return set(), set()
 
     # ---------------- Scheduler-side ----------------
     def get_num_new_matched_tokens(self, request: "Any", num_computed_tokens: int) -> tuple[int, bool]:
