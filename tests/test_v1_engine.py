@@ -176,7 +176,8 @@ def test_v1_engine_roundtrip_full_hit():
         from distributed_kv_manager.engine import should_retrieve as _should
         mi2 = core._build_model_input(SimpleNamespace(model=req2.model), req2, None)  # type: ignore
         hit_status = _should(mi2)
-        assert can_load is True
+        # 同步实现：第二返回值为是否异步加载，恒为 False
+        assert can_load is False
         assert need == max(0, len(tokens) - 1)
         # HIT 枚举值验证（RetrieveStatus.HIT）
         from distributed_kv_manager.engine import RetrieveStatus as _RS
