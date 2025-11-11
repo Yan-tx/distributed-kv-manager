@@ -9,7 +9,8 @@
     "kv_expire_time": 86400,
     "cleanup_interval": 3600,
     "crail_dir": "./crail_kvcache",
-    "local_dir": "/kvcache"
+    "local_dir": "/kvcache",
+    "store_after_prefill": true
   },
   "rank": 0,
   "local_rank": 0
