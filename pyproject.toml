@@ -4,6 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = [""]
+include = ["distributed_kv_manager", "distributed_kv_manager.*"]
 
 [project]
 name = "distributed_kv_manager"
@@ -13,4 +14,4 @@ authors = [{ name="Yan Tiexin", email="yan_tx@sjtu.edu.cn" }]
 dependencies = []
 
 [tool.setuptools.package-data]
-"distributed_kv_manager" = ["vllm_adapter/*.py"]
+"distributed_kv_manager" = []
