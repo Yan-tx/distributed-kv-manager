@@ -210,12 +210,31 @@ class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
                 )
                 self._planned_end_token[req_id] = end_tok
 
+        def _flatten_block_ids(group) -> list[int]:
+            # Accept shapes like [int,...] or [(list[int]), ...]
+            if group is None:
+                return []
+            # If it's already a flat list of ints
+            if isinstance(group, (list, tuple)) and (len(group) == 0 or isinstance(group[0], int)):
+                return list(group)
+            # Otherwise, flatten nested lists/tuples
+            out: list[int] = []
+            try:
+                for sub in group:
+                    if isinstance(sub, (list, tuple)):
+                        out.extend(int(x) for x in sub)
+                    else:
+                        out.append(int(sub))
+            except Exception:
+                pass
+            return out
+
         cached = scheduler_output.scheduled_cached_reqs
         for idx, req_id in enumerate(cached.req_ids):
             req = self._requests.get(req_id)
             if req is None:
                 continue
-            new_block_ids_tuple = cached.new_block_ids[idx]
+            new_block_id_groups = cached.new_block_ids[idx]
             # 安全获取 gpu_block_size，兼容不同 vLLM 结构
             gpu_bs = 16
             vc = getattr(self.vllm_config, "v1_config", None)
@@ -223,10 +242,11 @@ class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
                 gpu_bs = getattr(vc, "gpu_block_size", gpu_bs)
             else:
                 gpu_bs = getattr(self.vllm_config, "gpu_block_size", gpu_bs)
-            if not new_block_ids_tuple:
+            flat_block_ids = _flatten_block_ids(new_block_id_groups)
+            if not flat_block_ids:
                 continue
-            min_blk = min(new_block_ids_tuple)
-            max_blk = max(new_block_ids_tuple)
+            min_blk = min(flat_block_ids)
+            max_blk = max(flat_block_ids)
             start_tok = min_blk * gpu_bs
             end_tok = (max_blk + 1) * gpu_bs
             prev_end = self._planned_end_token.get(req_id, 0)
