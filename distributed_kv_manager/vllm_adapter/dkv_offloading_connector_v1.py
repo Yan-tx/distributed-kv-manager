@@ -10,19 +10,72 @@ from types import SimpleNamespace
 import logging
 import torch
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.attention import AttentionMetadata
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.distributed.kv_transfer.kv_connector.v1 import (
-    KVConnectorBase_V1,
-    KVConnectorRole,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+try:
+    from vllm.config import VllmConfig
+    from vllm.logger import init_logger
+except Exception:  # pragma: no cover - compatibility shim
+    class VllmConfig:  # type: ignore
+        def __init__(self) -> None:
+            self.model_config = None
+            self.parallel_config = None
+            self.v1_config = type("X", (), {"gpu_block_size": 16})()
+            self.gpu_block_size = 16
+
+    def init_logger(name: str):  # type: ignore
+        import logging as _logging
+        return _logging.getLogger(name)
+try:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.request import Request
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.distributed.kv_transfer.kv_connector.v1 import (
+        KVConnectorBase_V1,
+        KVConnectorRole,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+except Exception:  # pragma: no cover - compatibility shim
+    # 轻量级兜底 stub，避免不同 vLLM 版本缺失符号导致 ImportError。
+    from typing import Any, Dict, List
+
+    class KVConnectorBase_V1:  # type: ignore
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class KVConnectorRole:  # type: ignore
+        name = "unknown"
+
+    class KVConnectorMetadata:  # type: ignore
+        pass
+
+    class KVCacheConfig:  # type: ignore
+        pass
+
+    class Request:  # type: ignore
+        def __init__(self) -> None:
+            self.request_id = "stub"
+            self.num_computed_tokens = 0
+            # Some versions use req_id
+            self.req_id = self.request_id
+
+    class KVCacheBlocks:  # type: ignore
+        def get_block_ids(self):
+            return [[0]]
+
+    class _Cached:  # helper for scheduled_cached_reqs
+        def __init__(self) -> None:
+            self.req_ids: List[str] = []
+            self.new_block_ids: List[List[int]] = []
+
+    class SchedulerOutput:  # type: ignore
+        def __init__(self) -> None:
+            self.scheduled_new_reqs: List[Request] = []
+            self.num_scheduled_tokens: Dict[str, int] = {}
+            self.scheduled_cached_reqs = _Cached()
+            # forward_context 可能存在于部分版本，这里让它自引用以复用字段名
+            self.forward_context = self
+            # requests map, used by some code paths
+            self.requests: Dict[str, Request] = {}
 
 from distributed_kv_manager.engine import (
     init_engine,
@@ -44,12 +97,12 @@ class DKVTransferItem:
 
 
 @dataclass
-class DKVOffloadingConnectorMetadata(KVConnectorMetadata):
+class DKVOffloadingConnectorMetadata(KVConnectorMetadata):  # type: ignore[misc]
     reqs_to_store: dict[str, list[DKVTransferItem]]
     reqs_to_load: dict[str, list[DKVTransferItem]]
 
 
-class DKVOffloadingConnector(KVConnectorBase_V1):
+class DKVOffloadingConnector(KVConnectorBase_V1):  # type: ignore[misc]
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -89,7 +142,7 @@ class DKVOffloadingConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: Any,
         **kwargs,
     ) -> None:
         return
@@ -184,7 +237,7 @@ class DKVOffloadingConnector(KVConnectorBase_V1):
         self._connector_metadata = meta
         return meta
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: Any):
         return
 
     def request_finished(

@@ -13,9 +13,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.attention import AttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -112,7 +110,7 @@ class DKVOffloadingConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: Any,
         **kwargs,
     ) -> None:
         # We perform store at the end via wait_for_save where the full kv_caches are visible.
@@ -219,7 +217,7 @@ class DKVOffloadingConnector(KVConnectorBase_V1):
         self._connector_metadata = meta
         return meta
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: Any):
         # No-op for now
         return
 
