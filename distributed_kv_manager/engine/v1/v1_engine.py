@@ -280,7 +280,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     num_sched = 0
             is_last_prefill = (num_comp + num_sched) >= len(toks)
             # 保存策略：初始 skip_leading 为已持久化 token 数（上次为 0）
-            plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
+            plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill, num_sched_tokens=num_sched)
             meta.add_request(plan)
             # 保存 tracker
             self._request_tokens[req_id] = toks
@@ -306,7 +306,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     except Exception:
                         num_sched = 0
                 is_last_prefill = (num_comp + num_sched) >= len(toks)
-                plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
+                plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill, num_sched_tokens=num_sched)
                 meta.add_request(plan)
                 self._request_tokens[req_id] = toks
                 self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
@@ -325,7 +325,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                         except Exception:
                             num_sched = 0
                     is_last_prefill = (num_comp + num_sched) >= len(toks)
-                    plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
+                    plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill, num_sched_tokens=num_sched)
                     meta.add_request(plan)
                     self._request_tokens[req_id] = toks
                     self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
@@ -499,7 +499,8 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         return mi
 
     def _build_request_plan(self, req_id: str, tokens: List[int],
-                            load_spec: Optional[_ReqLoadSpec], is_last_prefill: bool) -> _RequestPlan:
+                            load_spec: Optional[_ReqLoadSpec], is_last_prefill: bool,
+                            num_sched_tokens: Optional[int] = None) -> _RequestPlan:
         slot_tensor = self._build_slot_mapping_from_blocks(req_id, len(tokens))
         slot_list = (
             slot_tensor.tolist()
@@ -519,9 +520,22 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             if end > start:
                 plan.load_spans.append(_LoadSpan(start=start, end=end))
         prev = int(self._req_last_stored.get(req_id, 0))
+        # 生成存储计划：
+        # - 若为最后一次 prefill，则存储到完整 prompt 长度。
+        # - 否则尝试增量存储本步新调度的 token（如果知道 num_sched_tokens）。
         if is_last_prefill and len(tokens) > prev:
             plan.store_spans.append(_StoreSpan(start=prev, end=len(tokens)))
             self._req_last_stored[req_id] = len(tokens)
+        else:
+            try:
+                ns = int(num_sched_tokens or 0)
+            except Exception:
+                ns = 0
+            if ns > 0 and len(tokens) > prev:
+                end = min(len(tokens), prev + ns)
+                if end > prev:
+                    plan.store_spans.append(_StoreSpan(start=prev, end=end))
+                    self._req_last_stored[req_id] = end
         return plan
 
     def _resolve_session_id(self, req_id: str) -> str:
