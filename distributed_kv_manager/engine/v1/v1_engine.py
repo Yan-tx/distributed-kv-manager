@@ -109,6 +109,8 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         self._req_block_ids = {}
         # 记录每个请求最近一次构建的 slot_mapping（1D 索引）
         self._req_slot_mapping = {}
+        # 记录调度器本步为每个请求分配/调度的 token 数（来自 update_state_after_alloc 的 num_external_tokens）
+        self._req_sched_tokens: Dict[str, int] = {}
         # 保存当前步骤构造的元数据供 worker 使用
         self._current_metadata = None
         try:
@@ -218,6 +220,11 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         # 记录 unfinished 请求供后续 build_connector_meta/start_load_kv 使用
         req_id = getattr(request, 'request_id', getattr(request, 'req_id', ''))
         self._unfinished_requests[req_id] = request
+        # 记录本步调度的 token 数，供判定是否为最后一次 prefill
+        try:
+            self._req_sched_tokens[req_id] = int(num_external_tokens or 0)
+        except Exception:
+            self._req_sched_tokens[req_id] = 0
         # 维护 token id 序列（prompt token + 已调度新 token）简化：直接使用 prompt_token_ids
         toks = list(getattr(request, 'prompt_token_ids', []))
         self._request_tokens[req_id] = toks
@@ -263,7 +270,14 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             num_comp = int(getattr(req, 'num_computed_tokens', 0) or 0)
             load_spec = self._load_specs.pop(req_id, None)
             # 是否最后一次 prefill: prompt 全部被调度
-            num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
+            # 优先使用 update_state_after_alloc 提供的 num_external_tokens；
+            # 若不可用，再回退到 scheduler_output 提供的统计；最后默认为 0。
+            num_sched = int(self._req_sched_tokens.get(req_id, 0))
+            if num_sched == 0:
+                try:
+                    num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
+                except Exception:
+                    num_sched = 0
             is_last_prefill = (num_comp + num_sched) >= len(toks)
             # 保存策略：初始 skip_leading 为已持久化 token 数（上次为 0）
             plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
@@ -272,6 +286,8 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             self._request_tokens[req_id] = toks
             self._unfinished_requests[req_id] = req
             self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
+            # 本轮统计已消费，避免下一轮误用旧值
+            self._req_sched_tokens.pop(req_id, None)
 
         # 已在缓存中继续调度的请求（cached_reqs）
         cached_reqs = getattr(scheduler_output, 'scheduled_cached_reqs', None)
@@ -283,12 +299,18 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 toks = self._request_tokens.get(req_id, list(getattr(req, 'prompt_token_ids', [])))
                 num_comp = int(getattr(req, 'num_computed_tokens', 0) or 0)
                 load_spec = None  # 对继续的请求不再尝试 load
-                num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
+                num_sched = int(self._req_sched_tokens.get(req_id, 0) or 0)
+                if num_sched == 0:
+                    try:
+                        num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
+                    except Exception:
+                        num_sched = 0
                 is_last_prefill = (num_comp + num_sched) >= len(toks)
                 plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
                 meta.add_request(plan)
                 self._request_tokens[req_id] = toks
                 self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
+                self._req_sched_tokens.pop(req_id, None)
         else:
             try:
                 for i, req_id in enumerate(getattr(cached_reqs, 'req_ids', []) or []):
@@ -296,12 +318,18 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     toks = self._request_tokens.get(req_id, list(getattr(req, 'prompt_token_ids', [])))
                     num_comp = int(getattr(req, 'num_computed_tokens', 0) or 0)
                     load_spec = None
-                    num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
+                    num_sched = int(self._req_sched_tokens.get(req_id, 0) or 0)
+                    if num_sched == 0:
+                        try:
+                            num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
+                        except Exception:
+                            num_sched = 0
                     is_last_prefill = (num_comp + num_sched) >= len(toks)
                     plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
                     meta.add_request(plan)
                     self._request_tokens[req_id] = toks
                     self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
+                    self._req_sched_tokens.pop(req_id, None)
             except Exception:
                 pass
 
