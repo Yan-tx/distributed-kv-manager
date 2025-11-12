@@ -239,11 +239,22 @@ from distributed_kv_manager import should_store, store_kv, should_retrieve, retr
 # Initialize the engine
 engine = init_engine(config)
 
+# Prepare optional hidden/intermediate states captured from the model output.
+# This is required when you expect full bypass on a cache hit.
+hidden_states = hidden_or_intermediate_states_from_model_output(...)
 
 # Store KV cache if needed
 if store_status == StoreStatus.STORED:
-    store_kv(model_config, parallel_config, transfer_config,
-             model_executable, model_input, kv_caches, store_status)
+    store_kv(
+        model_config,
+        parallel_config,
+        transfer_config,
+        model_executable,
+        model_input,
+        kv_caches,
+        store_status,
+        hidden_or_intermediate_states=hidden_states,
+    )
 
 # Check if we can retrieve KV cache
 retrieve_status = should_retrieve(model_input)
@@ -550,4 +561,4 @@ Note: the legacy top‑level module `distributed_kv_manager/prefetch.py` was rem
 - Adaptive layer split based on access latency & hit rates
 - Dynamic prefetch budgeting (utilization feedback loop)
 - Extended telemetry export (prometheus hooks)
-- Additional remote backends (S3, NFS, OSS) via dynamic import
+- Additional remote backends (AS13000, Crail) via dynamic import

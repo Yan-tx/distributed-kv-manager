@@ -265,13 +265,24 @@ from distributed_kv_manager import should_store, store_kv, should_retrieve, retr
 # 初始化引擎
 engine = init_engine(config)
 
+# 从模型输出中获取可选的隐藏态 / 中间结果，用于完全命中时的 bypass。
+hidden_states = hidden_or_intermediate_states_from_model_output(...)
+
 # 检查是否应该存储KV缓存
 store_status = should_store(model_input)
 
 # 如需要则存储KV缓存
 if store_status == StoreStatus.STORED:
-    store_kv(model_config, parallel_config, transfer_config,
-             model_executable, model_input, kv_caches, store_status)
+    store_kv(
+        model_config,
+        parallel_config,
+        transfer_config,
+        model_executable,
+        model_input,
+        kv_caches,
+        store_status,
+        hidden_or_intermediate_states=hidden_states,
+    )
 
 # 检查是否可以检索KV缓存
 retrieve_status = should_retrieve(model_input)
@@ -577,5 +588,4 @@ from distributed_kv_manager.prefetch import (
 
 - 自适应层拆分（基于延迟与命中率）
 - 动态预取预算调节（利用率反馈）
-- 远端后端扩展（S3 / NFS / 对象存储）
-- Telemetry 指标暴露（Prometheus 集成）
+- 远端后端扩展（Crail/ AS13000）

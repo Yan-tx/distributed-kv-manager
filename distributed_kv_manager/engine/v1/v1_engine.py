@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, Set
 
@@ -38,32 +39,36 @@ class _ReqLoadSpec:
         self.can_load = can_load
 
 
-class _ReqSaveSpec:
-    def __init__(self, skip_leading_tokens: int, can_save: bool):
-        self.skip_leading_tokens = skip_leading_tokens
-        self.can_save = can_save
+@dataclass
+class _LoadSpan:
+    start: int
+    end: int
 
 
-class _ReqMeta:
-    def __init__(self, req_id: str, token_ids: List[int], slot_mapping: torch.Tensor,
-                 load_spec: Optional[_ReqLoadSpec], save_spec: Optional[_ReqSaveSpec],
-                 is_last_prefill: bool):
-        self.req_id = req_id
-        self.token_ids = token_ids
-        self.slot_mapping = slot_mapping
-        self.load_spec = load_spec
-        self.save_spec = save_spec
-        self.is_last_prefill = is_last_prefill
+@dataclass
+class _StoreSpan:
+    start: int
+    end: int
+
+
+@dataclass
+class _RequestPlan:
+    req_id: str
+    session_id: str
+    token_ids: List[int]
+    slot_mapping: List[int]
+    load_spans: List[_LoadSpan] = field(default_factory=list)
+    store_spans: List[_StoreSpan] = field(default_factory=list)
+    is_last_prefill: bool = False
 
 
 class _V1Metadata(KVConnectorMetadata):
     def __init__(self) -> None:
         super().__init__()
-        self.requests: List[_ReqMeta] = []
-        # lookup requests to unpin (兼容未来扩展)
-        self.lookup_requests_in_step: List[str] = []
-    def add_request(self, m: _ReqMeta):
-        self.requests.append(m)
+        self.requests: List[_RequestPlan] = []
+
+    def add_request(self, request_plan: _RequestPlan) -> None:
+        self.requests.append(request_plan)
 
 
 class V1KVEngineImpl(KVConnectorBase_V1):
@@ -134,26 +139,15 @@ class V1KVEngineImpl(KVConnectorBase_V1):
     def start_load_kv(self, forward_context: Any, **kwargs) -> None:
         # 持有 forward_context 供后续 wait_for_save 使用
         self._last_forward_context = forward_context
-        # 使用构建好的 metadata 中的 load_spec 执行检索
-        try:
-            meta = self._get_connector_metadata()
-        except Exception:
-            meta = self._current_metadata
-        if meta is None:
+        meta = self._safe_get_metadata()
+        if meta is None or not meta.requests:
             return
         self._logger.debug("[v1_engine] start_load_kv: meta.requests=%d", len(meta.requests))
-        for rm in meta.requests:
-            ls = rm.load_spec
-            if ls is None or not ls.can_load:
+        for plan in meta.requests:
+            if not plan.load_spans:
                 continue
-            # 当前实现仅支持全量命中时的加载（kv_engine 只对完整 token 序列命中）
-            self._logger.debug("[v1_engine] load req=%s cached_tokens=%d vllm_cached=%d", rm.req_id, ls.cached_tokens, ls.vllm_cached_tokens)
-            # 如果 vLLM 已有部分（num_computed_tokens>0）则不再检索
-            if ls.vllm_cached_tokens == 0 and ls.cached_tokens > 0:
-                # 构造一个伪 request 对象：从 unfinished map 获取原始
-                req = self._unfinished_requests.get(rm.req_id)
-                if req is not None:
-                    self._retrieve_full(forward_context, req)
+            for span in plan.load_spans:
+                self._execute_load_plan(forward_context, plan, span)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
@@ -167,27 +161,14 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             fc = self._last_forward_context
             if fc is None:
                 return
-            try:
-                meta = self._get_connector_metadata()
-            except Exception:
-                meta = self._current_metadata
-            if meta is None:
+            meta = self._safe_get_metadata()
+            if meta is None or not meta.requests:
                 return
-            for rm in meta.requests:
-                req = self._unfinished_requests.get(rm.req_id)
-                if req is None:
+            for plan in meta.requests:
+                if not plan.store_spans:
                     continue
-                total_tokens = int(getattr(req, 'num_computed_tokens', 0) or 0)
-                if self._skip_last_n > 0 and rm.is_last_prefill:
-                    total_tokens = max(0, total_tokens - self._skip_last_n)
-                prev = int(self._req_last_stored.get(rm.req_id, 0))
-                # 保存策略：达到 chunk 边界 或 last prefill
-                boundary = (prev // self._chunk_size + 1) * self._chunk_size
-                should_flush = rm.is_last_prefill or total_tokens >= boundary
-                if should_flush and total_tokens > prev:
-                    self._logger.debug("[v1_engine] store req=%s span=[%d,%d) last_prefill=%s", rm.req_id, prev, total_tokens, rm.is_last_prefill)
-                    self._store_slice(fc, req, prev, total_tokens)
-                    self._req_last_stored[rm.req_id] = total_tokens
+                for span in plan.store_spans:
+                    self._store_plan_span(fc, plan, span)
             # 可选：同步等待写入完成，方便立即看到落盘
             try:
                 vcfg = getattr(self.vllm_config, "kv_transfer_config", None)
@@ -285,13 +266,12 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
             is_last_prefill = (num_comp + num_sched) >= len(toks)
             # 保存策略：初始 skip_leading 为已持久化 token 数（上次为 0）
-            save_spec = _ReqSaveSpec(skip_leading_tokens=self._req_last_stored.get(req_id, 0), can_save=True)
-            slot_mapping = self._build_slot_mapping_from_blocks(req_id, len(toks))
-            meta.add_request(_ReqMeta(req_id, toks, slot_mapping, load_spec, save_spec, is_last_prefill))
+            plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
+            meta.add_request(plan)
             # 保存 tracker
             self._request_tokens[req_id] = toks
             self._unfinished_requests[req_id] = req
-            self._req_slot_mapping[req_id] = slot_mapping
+            self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
 
         # 已在缓存中继续调度的请求（cached_reqs）
         cached_reqs = getattr(scheduler_output, 'scheduled_cached_reqs', None)
@@ -305,10 +285,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 load_spec = None  # 对继续的请求不再尝试 load
                 num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
                 is_last_prefill = (num_comp + num_sched) >= len(toks)
-                save_spec = _ReqSaveSpec(skip_leading_tokens=self._req_last_stored.get(req_id, 0), can_save=True)
-                slot_mapping = self._build_slot_mapping_from_blocks(req_id, len(toks))
-                meta.add_request(_ReqMeta(req_id, toks, slot_mapping, load_spec, save_spec, is_last_prefill))
-                self._req_slot_mapping[req_id] = slot_mapping
+                plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
+                meta.add_request(plan)
+                self._request_tokens[req_id] = toks
+                self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
         else:
             try:
                 for i, req_id in enumerate(getattr(cached_reqs, 'req_ids', []) or []):
@@ -318,10 +298,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     load_spec = None
                     num_sched = int(getattr(scheduler_output, 'num_scheduled_tokens', {}).get(req_id, 0))
                     is_last_prefill = (num_comp + num_sched) >= len(toks)
-                    save_spec = _ReqSaveSpec(skip_leading_tokens=self._req_last_stored.get(req_id, 0), can_save=True)
-                    slot_mapping = self._build_slot_mapping_from_blocks(req_id, len(toks))
-                    meta.add_request(_ReqMeta(req_id, toks, slot_mapping, load_spec, save_spec, is_last_prefill))
-                    self._req_slot_mapping[req_id] = slot_mapping
+                    plan = self._build_request_plan(req_id, toks, load_spec, is_last_prefill)
+                    meta.add_request(plan)
+                    self._request_tokens[req_id] = toks
+                    self._req_slot_mapping[req_id] = torch.tensor(plan.slot_mapping, dtype=torch.long)
             except Exception:
                 pass
 
@@ -346,6 +326,20 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         return
 
     # ---------------- Internal helpers ----------------
+    def _safe_get_metadata(self) -> Optional[_V1Metadata]:
+        try:
+            meta = self._get_connector_metadata()
+        except Exception:
+            meta = self._current_metadata
+        if isinstance(meta, _V1Metadata):
+            return meta
+        if isinstance(meta, KVConnectorMetadata) and hasattr(meta, "requests"):
+            # vLLM 可能反序列化为普通对象；尽量构造 _V1Metadata 视图
+            new_meta = _V1Metadata()
+            new_meta.requests = getattr(meta, "requests")
+            return new_meta
+        return None
+
     def _retrieve_full(self, fc: Any, req: Any) -> None:
         mi = self._build_model_input(fc, req, None)
         if mi is None:
@@ -361,6 +355,22 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             return
         retrieve_kv(model_exec, mi, kvs, rs)
         self._logger.debug("[retrieve] req=%s tokens=%d", getattr(req, "request_id", "?"), mi.input_tokens.shape[0])
+
+    def _execute_load_plan(self, fc: Any, plan: _RequestPlan, span: _LoadSpan) -> None:
+        mi = self._build_model_input_from_plan(plan, span)
+        if mi is None:
+            return
+        rs = should_retrieve(mi)
+        kvs = self._collect_kv(fc, (span.start, span.end))
+        if not kvs:
+            self._logger.warning("[v1_engine] load plan missing kv caches req=%s span=%s", plan.req_id, span)
+            return
+        model_exec = self._get_model_exec(fc)
+        if model_exec is None:
+            self._logger.warning("[v1_engine] load plan: forward_context has no model; skip req=%s", plan.req_id)
+            return
+        retrieve_kv(model_exec, mi, kvs, rs)
+        self._logger.debug("[v1_engine] load req=%s span=[%d,%d)", plan.req_id, span.start, span.end)
 
     def _store_slice(self, fc: Any, req: Any, start: int, end: int) -> None:
         if end <= start:
@@ -378,6 +388,24 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             return
         store_kv(self.vllm_config.model_config, self.vllm_config.parallel_config, None, model_exec, mi, kvs, ss, None)
         self._logger.debug("[store] req=%s span=[%d,%d) len=%d", getattr(req, "request_id", "?"), start, end, end-start)
+
+    def _store_plan_span(self, fc: Any, plan: _RequestPlan, span: _StoreSpan) -> None:
+        if span.end <= span.start:
+            return
+        mi = self._build_model_input_from_plan(plan, span)
+        if mi is None:
+            return
+        kvs = self._collect_kv(fc, (span.start, span.end))
+        if not kvs:
+            self._logger.warning("[v1_engine] store plan missing kv caches req=%s span=%s", plan.req_id, span)
+            return
+        model_exec = self._get_model_exec(fc)
+        if model_exec is None:
+            self._logger.warning("[v1_engine] store plan: forward_context has no model; skip req=%s", plan.req_id)
+            return
+        ss = should_store(mi)
+        store_kv(self.vllm_config.model_config, self.vllm_config.parallel_config, None, model_exec, mi, kvs, ss, None)
+        self._logger.debug("[v1_engine] store req=%s span=[%d,%d)", plan.req_id, span.start, span.end)
 
     def _build_model_input(self, fc: Any, req: Any, span: Optional[Tuple[int, int]]) -> Optional[SimpleNamespace]:
         inp = getattr(req, "input_ids", None)
@@ -440,6 +468,67 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         mi.layer_id = 0
         if span is not None:
             mi.payload_meta = {"token_offset": int(span[0]), "block_size": int(tokens.shape[0])}
+        return mi
+
+    def _build_request_plan(self, req_id: str, tokens: List[int],
+                            load_spec: Optional[_ReqLoadSpec], is_last_prefill: bool) -> _RequestPlan:
+        slot_tensor = self._build_slot_mapping_from_blocks(req_id, len(tokens))
+        slot_list = (
+            slot_tensor.tolist()
+            if torch.is_tensor(slot_tensor)
+            else [int(x) for x in slot_tensor]
+        )
+        plan = _RequestPlan(
+            req_id=req_id,
+            session_id=self._resolve_session_id(req_id),
+            token_ids=[int(t) for t in tokens],
+            slot_mapping=[int(s) for s in slot_list],
+            is_last_prefill=is_last_prefill,
+        )
+        if load_spec and load_spec.can_load:
+            start = int(load_spec.vllm_cached_tokens)
+            end = int(load_spec.cached_tokens)
+            if end > start:
+                plan.load_spans.append(_LoadSpan(start=start, end=end))
+        prev = int(self._req_last_stored.get(req_id, 0))
+        if is_last_prefill and len(tokens) > prev:
+            plan.store_spans.append(_StoreSpan(start=prev, end=len(tokens)))
+            self._req_last_stored[req_id] = len(tokens)
+        return plan
+
+    def _resolve_session_id(self, req_id: str) -> str:
+        try:
+            sid_src = getattr(getattr(self.vllm_config, "kv_transfer_config", None), "engine_id", None)
+            if sid_src:
+                return str(sid_src)
+        except Exception:
+            pass
+        return req_id or "v1_session"
+
+    def _build_model_input_from_plan(self, plan: _RequestPlan, span: Any) -> Optional[SimpleNamespace]:
+        start = int(getattr(span, "start", 0))
+        end = int(getattr(span, "end", len(plan.token_ids)))
+        if end <= start:
+            return None
+        token_slice = plan.token_ids[start:end]
+        if not token_slice:
+            return None
+        slot_source = plan.slot_mapping if plan.slot_mapping else list(range(len(plan.token_ids)))
+        slot_slice = slot_source[start:end]
+        fc = self._last_forward_context
+        dev = self._infer_device(fc)
+        tokens = torch.tensor(token_slice, dtype=torch.long, device=dev)
+        slot_tensor = torch.tensor(slot_slice[: len(token_slice)], dtype=torch.long, device=dev)
+        mi = SimpleNamespace()
+        mi.input_tokens = tokens
+        am = SimpleNamespace()
+        am.seq_lens = [int(tokens.shape[0])]
+        am.slot_mapping = slot_tensor
+        mi.attn_metadata = am
+        sid = plan.session_id.encode("utf-8", errors="ignore")
+        mi.session_id = sid or b"v1_session"
+        mi.layer_id = 0
+        mi.payload_meta = {"token_offset": start, "block_size": int(tokens.shape[0])}
         return mi
 
     def _build_slot_mapping_from_blocks(self, req_id: str, token_len: int) -> torch.Tensor:
