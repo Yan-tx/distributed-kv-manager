@@ -194,11 +194,17 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 if plan.load_spans:
                     for span in plan.load_spans:
                         self._logger.info("[v1_engine] load-plan req=%s span=[%d,%d) mode=%s", plan.req_id, span.start, span.end, getattr(self, '_storage_mode', 'n/a'))
-                        self._load_by_plan_slice(forward_context, plan, span.start, span.end)
+                        if getattr(self, '_storage_mode', 'aggregate') == 'layered' and getattr(self, '_v1_layered', None) is not None:
+                            self._load_by_plan_slice_layered(forward_context, plan, span.start, span.end)
+                        else:
+                            self._load_by_plan_slice(forward_context, plan, span.start, span.end)
                 else:
                     # 无明确切片则按整个 token_ids
                     self._logger.info("[v1_engine] load-plan(req=%s) no-span -> full [0,%d) mode=%s", plan.req_id, len(plan.token_ids), getattr(self, '_storage_mode', 'n/a'))
-                    self._load_by_plan_slice(forward_context, plan, 0, len(plan.token_ids))
+                    if getattr(self, '_storage_mode', 'aggregate') == 'layered' and getattr(self, '_v1_layered', None) is not None:
+                        self._load_by_plan_slice_layered(forward_context, plan, 0, len(plan.token_ids))
+                    else:
+                        self._load_by_plan_slice(forward_context, plan, 0, len(plan.token_ids))
             except Exception:
                 self._logger.exception("start_load_kv: failed for req=%s", getattr(plan, 'req_id', '?'))
 
@@ -312,7 +318,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                         # 优先刷写逐层收集的 pending；不足时回退从 paged KV 采集
                         if not self._flush_pending_span(fc, plan, span):
                             self._logger.info("[v1_engine] pending miss -> fallback gather req=%s span=[%d,%d)", plan.req_id, span.start, span.end)
-                            self._save_by_plan_slice(fc, plan, span.start, span.end)
+                            if getattr(self, '_storage_mode', 'aggregate') == 'layered' and getattr(self, '_v1_layered', None) is not None:
+                                self._save_by_plan_slice_layered(fc, plan, span.start, span.end)
+                            else:
+                                self._save_by_plan_slice(fc, plan, span.start, span.end)
                 except Exception:
                     self._logger.exception("wait_for_save: store failed for req=%s", getattr(plan, 'req_id', '?'))
             # 可选：同步等待写入完成，方便立即看到落盘
@@ -554,6 +563,40 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             self._logger.info("[v1_engine] aggregate-load req=%s slice=[%d,%d) file=%s", plan.req_id, start, end, file_path)
         except Exception:
             self._logger.exception("_load_by_plan_slice failed for req=%s", plan.req_id)
+        
+    def _load_by_plan_slice_layered(self, fc: Any, plan: _RequestPlan, start: int, end: int) -> None:
+        try:
+            if end <= start:
+                return
+            if getattr(self, '_v1_layered', None) is None:
+                return
+            sess = plan.session_id.encode('utf-8', errors='ignore')
+            tokens = torch.tensor(plan.token_ids[start:end], dtype=torch.long)
+            num_layers = self._count_layers(fc)
+            if num_layers <= 0:
+                return
+            ks, vs = [], []
+            sm: Optional[torch.Tensor] = None
+            for lid in range(num_layers):
+                k_slice, v_slice, slot = self._v1_layered.download_layer_slice(sess, int(lid), tokens, start, end)
+                if k_slice is None or v_slice is None:
+                    self._logger.info("[v1_engine] load-miss(layered) req=%s span=[%d,%d) layer=%d", plan.req_id, start, end, int(lid))
+                    return
+                ks.append(k_slice.unsqueeze(0))
+                vs.append(v_slice.unsqueeze(0))
+                if sm is None and slot is not None:
+                    try:
+                        sm = torch.tensor(slot, dtype=torch.long)
+                    except Exception:
+                        sm = None
+            k_all = torch.cat(ks, dim=0)
+            v_all = torch.cat(vs, dim=0)
+            if sm is None:
+                sm = torch.tensor(plan.slot_mapping[start:end], dtype=torch.long) if plan.slot_mapping else torch.arange(end-start, dtype=torch.long)
+            self._inject_into_caches(fc, k_all, v_all, sm)
+            self._logger.info("[v1_engine] layered-load req=%s slice=[%d,%d) layers=%d", plan.req_id, start, end, num_layers)
+        except Exception:
+            self._logger.exception("_load_by_plan_slice_layered failed for req=%s", plan.req_id)
 
     def _store_slice(self, fc: Any, req: Any, start: int, end: int) -> None:
         if end <= start:
@@ -622,6 +665,46 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             self._logger.info("[v1_engine] aggregate-store req=%s slice=[%d,%d) -> %s", plan.req_id, start, end, file_path)
         except Exception:
             self._logger.exception("_save_by_plan_slice failed for req=%s", plan.req_id)
+        
+    def _save_by_plan_slice_layered(self, fc: Any, plan: _RequestPlan, start: int, end: int) -> None:
+        if end <= start:
+            return
+        try:
+            if getattr(self, '_v1_layered', None) is None:
+                return
+            sess = plan.session_id.encode('utf-8', errors='ignore')
+            tokens = torch.tensor(plan.token_ids[start:end], dtype=torch.long)
+            slot = torch.tensor(plan.slot_mapping[start:end], dtype=torch.long) if plan.slot_mapping else torch.arange(end-start, dtype=torch.long)
+            k_all, v_all = self._gather_from_caches(fc, slot)
+            if k_all is None or v_all is None or k_all.numel() == 0:
+                self._logger.warning("[v1_engine] no kv to store(layered) for req=%s slice=[%d,%d)", plan.req_id, start, end)
+                return
+            num_layers = int(k_all.shape[0]) if k_all.dim() >= 2 else 0
+            expire_time = int(getattr(getattr(self.vllm_config, 'kv_transfer_config', SimpleNamespace()), 'kv_expire_time', 86400) or 86400)
+            for lid in range(num_layers):
+                k_slice = k_all[lid]
+                v_slice = v_all[lid]
+                file_path, file_size = self._v1_layered.upload_layer_slice(sess, int(lid), tokens, k_slice, v_slice, slot, start, end, payload_meta_extra=None)
+                meta = KVMetadata(
+                    session_id=sess[:16].ljust(16, b"\x00"),
+                    layer_id=int(lid),
+                    token_idx=f"{start}-{end}",
+                    file_path=file_path,
+                    file_size=int(file_size),
+                    create_time=int(time.time()),
+                    last_access=int(time.time()),
+                    expire_time=expire_time,
+                    replica_locations=[b"" for _ in range(3)],
+                    status=1,
+                    schema_version=1,
+                    ext_flags=0,
+                    ext_data=b"",
+                    ext_data_len=0,
+                )
+                self._v1_meta.put_metadata(meta)
+                self._logger.info("[v1_engine] layered-store(req) req=%s span=[%d,%d) layer=%d file=%s", plan.req_id, start, end, int(lid), file_path)
+        except Exception:
+            self._logger.exception("_save_by_plan_slice_layered failed for req=%s", plan.req_id)
 
     def _build_model_input(self, fc: Any, req: Any, span: Optional[Tuple[int, int]]) -> Optional[SimpleNamespace]:
         inp = getattr(req, "input_ids", None)
@@ -874,6 +957,114 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         except Exception:
             self._logger.exception("_gather_from_caches failed")
             return None, None
+    
+    def _count_layers(self, fc: Any) -> int:
+        try:
+            caches = self._kv_caches if self._kv_caches else getattr(fc, 'kv_caches', {})
+            return int(len(caches))
+        except Exception:
+            return 0
+
+    def _flush_pending_span(self, fc: Any, plan: _RequestPlan, span: _StoreSpan) -> bool:
+        try:
+            start = int(getattr(span, 'start', 0))
+            end = int(getattr(span, 'end', len(plan.token_ids)))
+            if end <= start:
+                return True
+            key = (plan.req_id, start, end)
+            bucket = self._pending_store.get(key)
+            if not bucket:
+                return False
+            sess = plan.session_id.encode('utf-8', errors='ignore')
+            tokens = torch.tensor(plan.token_ids[start:end], dtype=torch.long)
+            slot = torch.tensor(plan.slot_mapping[start:end], dtype=torch.long)
+            if getattr(self, '_storage_mode', 'aggregate') == 'layered' and getattr(self, '_v1_layered', None) is not None:
+                flushed_any = False
+                for lid, item in list(bucket.items()):
+                    try:
+                        k_slice = item['k']
+                        v_slice = item['v']
+                        slot_slice = item['slot']
+                        self._v1_layered.upload_layer_slice(sess, int(lid), tokens, k_slice, v_slice, slot_slice, start, end, payload_meta_extra=None)
+                        expire_time = int(getattr(getattr(self.vllm_config, 'kv_transfer_config', SimpleNamespace()), 'kv_expire_time', 86400) or 86400)
+                        file_path = self._v1_layered._file_name(sess, int(lid), tokens, start, end)
+                        meta = KVMetadata(
+                            session_id=sess[:16].ljust(16, b"\x00"),
+                            layer_id=int(lid),
+                            token_idx=f"{start}-{end}",
+                            file_path=file_path,
+                            file_size=0,
+                            create_time=int(time.time()),
+                            last_access=int(time.time()),
+                            expire_time=expire_time,
+                            replica_locations=[b"" for _ in range(3)],
+                            status=1,
+                            schema_version=1,
+                            ext_flags=0,
+                            ext_data=b"",
+                            ext_data_len=0,
+                        )
+                        self._v1_meta.put_metadata(meta)
+                        self._logger.info("[v1_engine] layered-store req=%s span=[%d,%d) layer=%d file=%s", plan.req_id, start, end, int(lid), file_path)
+                        flushed_any = True
+                        bucket.pop(lid, None)
+                    except Exception:
+                        self._logger.exception("layered flush failed: req=%s lid=%s", plan.req_id, lid)
+                if not bucket:
+                    self._pending_store.pop(key, None)
+                return flushed_any
+            else:
+                num_layers = self._count_layers(fc)
+                if len(bucket) < max(1, num_layers):
+                    return False
+                ks, vs = [], []
+                for lid in range(num_layers):
+                    item = bucket.get(lid)
+                    if item is None:
+                        return False
+                    ks.append(item['k'].unsqueeze(0))
+                    vs.append(item['v'].unsqueeze(0))
+                k_all = torch.cat(ks, dim=0)
+                v_all = torch.cat(vs, dim=0)
+                payload_meta = {
+                    'schema_version': 1,
+                    'tokens_hash': self._tensor_hash(tokens),
+                    'num_layers': int(k_all.shape[0]) if k_all.dim() >= 2 else 0,
+                    'kv_dtype': str(k_all.dtype),
+                    'kv_tail_shape': list(k_all.shape[2:]) if k_all.dim() >= 3 else [],
+                    'slots_len': int(slot.numel()),
+                    'token_offset': int(start),
+                    'block_size': int(end - start),
+                }
+                data = self._v1_storage.pack_full_payload(k_all, v_all, tokens, torch.ones_like(tokens, dtype=torch.bool), slot, payload_meta)
+                file_path = self._make_key(tokens, sess, 0)
+                ok = self._v1_storage.upload(file_path, data)
+                if not ok:
+                    return False
+                expire_time = int(getattr(getattr(self.vllm_config, 'kv_transfer_config', SimpleNamespace()), 'kv_expire_time', 86400) or 86400)
+                meta = KVMetadata(
+                    session_id=sess[:16].ljust(16, b"\x00"),
+                    layer_id=0,
+                    token_idx=f"{start}-{end}",
+                    file_path=file_path,
+                    file_size=len(data),
+                    create_time=int(time.time()),
+                    last_access=int(time.time()),
+                    expire_time=expire_time,
+                    replica_locations=[b"" for _ in range(3)],
+                    status=1,
+                    schema_version=1,
+                    ext_flags=0,
+                    ext_data=b"",
+                    ext_data_len=0,
+                )
+                self._v1_meta.put_metadata(meta)
+                self._logger.info("[v1_engine] aggregate-store(pending) req=%s span=[%d,%d) -> %s", plan.req_id, start, end, file_path)
+                self._pending_store.pop(key, None)
+                return True
+        except Exception:
+            self._logger.exception("_flush_pending_span failed")
+            return False
 
     def _collect_kv(self, fc: Any, span: Optional[Tuple[int, int]]) -> List[torch.Tensor]:
         try:
@@ -995,114 +1186,3 @@ def v1_should_retrieve(model_input: Any) -> Any:
 def v1_retrieve_kv(model_executable: Any, model_input: Any,
                    kv_caches: List[torch.Tensor], retrieve_status: Any) -> Any:
     return None
-    def _flush_pending_span(self, fc: Any, plan: _RequestPlan, span: _StoreSpan) -> bool:
-        """Flush pending per-layer slices if available.
-
-        Returns True if flushed successfully (layered: any flushed; aggregate: all layers present),
-        False to request fallback to gather-from-cache path.
-        """
-        try:
-            start = int(getattr(span, 'start', 0))
-            end = int(getattr(span, 'end', len(plan.token_ids)))
-            if end <= start:
-                return True
-            key = (plan.req_id, start, end)
-            bucket = self._pending_store.get(key)
-            if not bucket:
-                return False
-            sess = self._resolve_session_bytes(plan.req_id)
-            tokens = torch.tensor(plan.token_ids[start:end], dtype=torch.long)
-            slot = torch.tensor(plan.slot_mapping[start:end], dtype=torch.long)
-            if getattr(self, '_storage_mode', 'aggregate') == 'layered' and getattr(self, '_v1_layered', None) is not None:
-                # 逐层写：有多少层刷多少层
-                flushed_any = False
-                for lid, item in list(bucket.items()):
-                    try:
-                        k_slice = item['k']
-                        v_slice = item['v']
-                        slot_slice = item['slot']
-                        self._v1_layered.upload_layer_slice(sess, int(lid), tokens, k_slice, v_slice, slot_slice, start, end, payload_meta_extra=None)
-                        # 写 etcd
-                        expire_time = int(getattr(getattr(self.vllm_config, 'kv_transfer_config', SimpleNamespace()), 'kv_expire_time', 86400) or 86400)
-                        file_path = self._v1_layered._file_name(sess, int(lid), tokens, start, end)
-                        meta = KVMetadata(
-                            session_id=sess[:16].ljust(16, b"\x00"),
-                            layer_id=int(lid),
-                            token_idx=f"{start}-{end}",
-                            file_path=file_path,
-                            file_size=0,
-                            create_time=int(time.time()),
-                            last_access=int(time.time()),
-                            expire_time=expire_time,
-                            replica_locations=[b"" for _ in range(3)],
-                            status=1,
-                            schema_version=1,
-                            ext_flags=0,
-                            ext_data=b"",
-                            ext_data_len=0,
-                        )
-                        self._v1_meta.put_metadata(meta)
-                        self._logger.info("[v1_engine] layered-store req=%s span=[%d,%d) layer=%d file=%s", plan.req_id, start, end, int(lid), file_path)
-                        flushed_any = True
-                        # 移除已刷项
-                        bucket.pop(lid, None)
-                    except Exception:
-                        self._logger.exception("layered flush failed: req=%s lid=%s", plan.req_id, lid)
-                if not bucket:
-                    self._pending_store.pop(key, None)
-                return flushed_any
-            else:
-                # 聚合写：需要所有层
-                num_layers = self._count_layers(fc)
-                if len(bucket) < max(1, num_layers):
-                    return False
-                # 按层序堆叠
-                ks, vs = [], []
-                for lid in range(num_layers):
-                    item = bucket.get(lid)
-                    if item is None:
-                        return False
-                    ks.append(item['k'].unsqueeze(0))
-                    vs.append(item['v'].unsqueeze(0))
-                k_all = torch.cat(ks, dim=0)
-                v_all = torch.cat(vs, dim=0)
-                payload_meta = {
-                    'schema_version': 1,
-                    'tokens_hash': self._tensor_hash(tokens),
-                    'num_layers': int(k_all.shape[0]) if k_all.dim() >= 2 else 0,
-                    'kv_dtype': str(k_all.dtype),
-                    'kv_tail_shape': list(k_all.shape[2:]) if k_all.dim() >= 3 else [],
-                    'slots_len': int(slot.numel()),
-                    'token_offset': int(start),
-                    'block_size': int(end - start),
-                }
-                data = self._v1_storage.pack_full_payload(k_all, v_all, tokens, torch.ones_like(tokens, dtype=torch.bool), slot, payload_meta)
-                file_path = self._make_key(tokens, sess, 0)
-                ok = self._v1_storage.upload(file_path, data)
-                if not ok:
-                    return False
-                expire_time = int(getattr(getattr(self.vllm_config, 'kv_transfer_config', SimpleNamespace()), 'kv_expire_time', 86400) or 86400)
-                meta = KVMetadata(
-                    session_id=sess[:16].ljust(16, b"\x00"),
-                    layer_id=0,
-                    token_idx=f"{start}-{end}",
-                    file_path=file_path,
-                    file_size=len(data),
-                    create_time=int(time.time()),
-                    last_access=int(time.time()),
-                    expire_time=expire_time,
-                    replica_locations=[b"" for _ in range(3)],
-                    status=1,
-                    schema_version=1,
-                    ext_flags=0,
-                    ext_data=b"",
-                    ext_data_len=0,
-                )
-                self._v1_meta.put_metadata(meta)
-                self._logger.info("[v1_engine] aggregate-store(pending) req=%s span=[%d,%d) -> %s", plan.req_id, start, end, file_path)
-                # 清理 pending
-                self._pending_store.pop(key, None)
-                return True
-        except Exception:
-            self._logger.exception("_flush_pending_span failed")
-            return False

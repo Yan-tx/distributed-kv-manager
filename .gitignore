@@ -129,6 +129,7 @@ dmypy.json
 .vscode/
 .idea/
 .github/
+.trae/
 
 # OS
 .DS_Store
