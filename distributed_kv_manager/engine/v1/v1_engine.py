@@ -582,6 +582,14 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 if k_slice is None or v_slice is None:
                     self._logger.info("[v1_engine] load-miss(layered) req=%s span=[%d,%d) layer=%d", plan.req_id, start, end, int(lid))
                     return
+                # 归一化去除单层维度，使得 k_slice/v_slice 形状为 [seq, ...]
+                try:
+                    if k_slice.dim() >= 2 and int(k_slice.shape[0]) == 1:
+                        k_slice = k_slice[0]
+                    if v_slice.dim() >= 2 and int(v_slice.shape[0]) == 1:
+                        v_slice = v_slice[0]
+                except Exception:
+                    pass
                 ks.append(k_slice.unsqueeze(0))
                 vs.append(v_slice.unsqueeze(0))
                 if sm is None and slot is not None:
@@ -802,6 +810,15 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 if end > prev:
                     plan.store_spans.append(_StoreSpan(start=prev, end=end))
                     self._req_last_stored[req_id] = end
+            else:
+                try:
+                    cfg = getattr(self.vllm_config, 'kv_transfer_config', SimpleNamespace())
+                    allow_store = bool(getattr(cfg, 'store_after_prefill', True))
+                except Exception:
+                    allow_store = True
+                if allow_store and len(tokens) > prev:
+                    plan.store_spans.append(_StoreSpan(start=prev, end=len(tokens)))
+                    self._req_last_stored[req_id] = len(tokens)
         return plan
 
     def _resolve_session_id(self, req_id: str) -> str:
@@ -916,20 +933,31 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 k_src = k_all[layer_idx]
                 v_src = v_all[layer_idx]
                 if key_cache.dim() == 3:
-                    limit = min(int(k_src.shape[0]), int(slot.numel()))
-                    if limit <= 0:
-                        continue
-                    key_cache[slot[:limit]] = k_src[:limit].to(key_cache.dtype)
-                    value_cache[slot[:limit]] = v_src[:limit].to(value_cache.dtype)
-                elif key_cache.dim() == 4:
                     idx = slot if torch.is_tensor(slot) else torch.tensor(slot, dtype=torch.long)
                     idx = idx.to(device=key_cache.device, dtype=torch.long)
-                    limit = min(int(k_src.shape[0]), int(idx.numel()), int(key_cache.shape[1]))
+                    limit = min(int(k_src.shape[0]), int(idx.numel()))
                     if limit <= 0:
                         continue
                     idx = idx[:limit]
-                    key_cache[0, idx] = k_src[:limit].to(device=key_cache.device, dtype=key_cache.dtype)
-                    value_cache[0, idx] = v_src[:limit].to(device=value_cache.device, dtype=value_cache.dtype)
+                    valid = (idx >= 0) & (idx < int(key_cache.shape[0]))
+                    if valid.any().item():
+                        idx_v = idx[valid]
+                        cnt = int(idx_v.numel())
+                        key_cache[idx_v] = k_src[:cnt].to(device=key_cache.device, dtype=key_cache.dtype)
+                        value_cache[idx_v] = v_src[:cnt].to(device=value_cache.device, dtype=value_cache.dtype)
+                elif key_cache.dim() == 4:
+                    idx = slot if torch.is_tensor(slot) else torch.tensor(slot, dtype=torch.long)
+                    idx = idx.to(device=key_cache.device, dtype=torch.long)
+                    limit = min(int(k_src.shape[0]), int(idx.numel()))
+                    if limit <= 0:
+                        continue
+                    idx = idx[:limit]
+                    valid = (idx >= 0) & (idx < int(key_cache.shape[1]))
+                    if valid.any().item():
+                        idx_v = idx[valid]
+                        cnt = int(idx_v.numel())
+                        key_cache[0, idx_v] = k_src[:cnt].to(device=key_cache.device, dtype=key_cache.dtype)
+                        value_cache[0, idx_v] = v_src[:cnt].to(device=value_cache.device, dtype=value_cache.dtype)
         except Exception:
             self._logger.exception("_inject_into_caches failed")
 
@@ -944,12 +972,23 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 key_cache = kv_cache[0]
                 value_cache = kv_cache[1]
                 if key_cache.dim() == 3:
-                    k = key_cache[slot]
-                    v = value_cache[slot]
+                    idx = slot if torch.is_tensor(slot) else torch.tensor(slot, dtype=torch.long)
+                    idx = idx.to(device=key_cache.device, dtype=torch.long)
+                    valid = (idx >= 0) & (idx < int(key_cache.shape[0]))
+                    idx_v = idx[valid]
+                    if idx_v.numel() == 0:
+                        continue
+                    k = key_cache[idx_v]
+                    v = value_cache[idx_v]
                 elif key_cache.dim() == 4:
-                    take = min(int(key_cache.shape[1]), int(slot.numel()))
-                    k = key_cache[0, :take]
-                    v = value_cache[0, :take]
+                    idx = slot if torch.is_tensor(slot) else torch.tensor(slot, dtype=torch.long)
+                    idx = idx.to(device=key_cache.device, dtype=torch.long)
+                    valid = (idx >= 0) & (idx < int(key_cache.shape[1]))
+                    idx_v = idx[valid]
+                    if idx_v.numel() == 0:
+                        continue
+                    k = key_cache[0, idx_v]
+                    v = value_cache[0, idx_v]
                 else:
                     continue
                 keys.append(k.unsqueeze(0))
