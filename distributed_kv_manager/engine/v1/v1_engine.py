@@ -586,7 +586,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 vs.append(v_slice.unsqueeze(0))
                 if sm is None and slot is not None:
                     try:
-                        sm = torch.tensor(slot, dtype=torch.long)
+                        sm = slot.clone().detach().to(dtype=torch.long) if torch.is_tensor(slot) else torch.tensor(slot, dtype=torch.long)
                     except Exception:
                         sm = None
             k_all = torch.cat(ks, dim=0)
@@ -922,11 +922,14 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     key_cache[slot[:limit]] = k_src[:limit].to(key_cache.dtype)
                     value_cache[slot[:limit]] = v_src[:limit].to(value_cache.dtype)
                 elif key_cache.dim() == 4:
-                    write_len = min(int(k_src.shape[0]), int(key_cache.shape[1]))
-                    if write_len <= 0:
+                    idx = slot if torch.is_tensor(slot) else torch.tensor(slot, dtype=torch.long)
+                    idx = idx.to(device=key_cache.device, dtype=torch.long)
+                    limit = min(int(k_src.shape[0]), int(idx.numel()), int(key_cache.shape[1]))
+                    if limit <= 0:
                         continue
-                    key_cache[0, :write_len] = k_src[:write_len].to(key_cache.dtype)
-                    value_cache[0, :write_len] = v_src[:write_len].to(value_cache.dtype)
+                    idx = idx[:limit]
+                    key_cache[0, idx] = k_src[:limit].to(device=key_cache.device, dtype=key_cache.dtype)
+                    value_cache[0, idx] = v_src[:limit].to(device=value_cache.device, dtype=value_cache.dtype)
         except Exception:
             self._logger.exception("_inject_into_caches failed")
 
