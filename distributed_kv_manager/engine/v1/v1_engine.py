@@ -151,7 +151,23 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         except Exception:
             st_dir = None
         eps = endpoints
-        self._logger.info("[v1_engine] initialized storage_dir=%s etcd_endpoints=%s (synchronous load/save)", st_dir, eps)
+        # storage mode and optional layered facade
+        try:
+            self._storage_mode: str = str(getattr(getattr(base_cfg, 'kv_transfer_config', SimpleNamespace()), 'v1_storage_mode', 'layered') or 'layered')
+        except Exception:
+            self._storage_mode = 'layered'
+        self._v1_layered = None
+        layered_state = 'disabled'
+        if self._storage_mode == 'layered':
+            try:
+                from distributed_kv_manager.storage.factory import StorageFactory as _SF
+                _backend = _SF.create_storage(base_cfg)
+                self._v1_layered = LayeredV1Storage(_backend)
+                layered_state = 'ok'
+            except Exception as e:
+                layered_state = f'failed: {e}'
+                self._v1_layered = None
+        self._logger.info("[v1_engine] initialized storage_dir=%s etcd_endpoints=%s storage_mode=%s layered_init=%s", st_dir, eps, self._storage_mode, layered_state)
 
     # ---------------- Worker-side ----------------
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -171,15 +187,17 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         meta = self._safe_get_metadata()
         if meta is None or not meta.requests:
             return
-        self._logger.debug("[v1_engine] start_load_kv: meta.requests=%d", len(meta.requests))
+        self._logger.info("[v1_engine] start_load_kv: meta.requests=%d", len(meta.requests))
         # 若判定可加载，则一次性按完整 prompt 长度加载
         for plan in meta.requests:
             try:
                 if plan.load_spans:
                     for span in plan.load_spans:
+                        self._logger.info("[v1_engine] load-plan req=%s span=[%d,%d) mode=%s", plan.req_id, span.start, span.end, getattr(self, '_storage_mode', 'n/a'))
                         self._load_by_plan_slice(forward_context, plan, span.start, span.end)
                 else:
                     # 无明确切片则按整个 token_ids
+                    self._logger.info("[v1_engine] load-plan(req=%s) no-span -> full [0,%d) mode=%s", plan.req_id, len(plan.token_ids), getattr(self, '_storage_mode', 'n/a'))
                     self._load_by_plan_slice(forward_context, plan, 0, len(plan.token_ids))
             except Exception:
                 self._logger.exception("start_load_kv: failed for req=%s", getattr(plan, 'req_id', '?'))
@@ -227,6 +245,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     e = int(getattr(span, 'end', len(plan.token_ids)))
                     if e <= s:
                         continue
+                    self._logger.info("[v1_engine] collect layer=%s idx=%d req=%s span=[%d,%d)", layer_name, layer_idx, req_id, s, e)
                     # 目标槽位：使用计划内的 slot_mapping
                     try:
                         slot_list = plan.slot_mapping[s:e]
@@ -271,6 +290,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                         'slot': slot_cpu,
                         'tokens': tokens,
                     }
+                    self._logger.info("[v1_engine] collected req=%s layer=%d span=[%d,%d) k=%s v=%s slot_len=%d", req_id, layer_idx, s, e, tuple(k_slice.shape), tuple(v_slice.shape), int(slot_cpu.numel()))
         except Exception:
             self._logger.exception("save_kv_layer failed for layer=%s", layer_name)
         return
@@ -288,8 +308,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     if not plan.store_spans:
                         continue
                     for span in plan.store_spans:
+                        self._logger.info("[v1_engine] flush req=%s span=[%d,%d) mode=%s", plan.req_id, span.start, span.end, getattr(self, '_storage_mode', 'n/a'))
                         # 优先刷写逐层收集的 pending；不足时回退从 paged KV 采集
                         if not self._flush_pending_span(fc, plan, span):
+                            self._logger.info("[v1_engine] pending miss -> fallback gather req=%s span=[%d,%d)", plan.req_id, span.start, span.end)
                             self._save_by_plan_slice(fc, plan, span.start, span.end)
                 except Exception:
                     self._logger.exception("wait_for_save: store failed for req=%s", getattr(plan, 'req_id', '?'))
@@ -518,7 +540,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             file_path = self._make_key(tokens, sess, 0)
             kv_bytes = self._v1_storage.download(file_path)
             if kv_bytes is None:
-                self._logger.debug("[v1_engine] load miss: %s", file_path)
+                self._logger.info("[v1_engine] load-miss (aggregate) file=%s req=%s slice=[%d,%d)", file_path, plan.req_id, start, end)
                 return
             info = self._v1_storage.extract_payload_info(kv_bytes)
             k_tensor, v_tensor = self._v1_storage.unpack_kv_data(kv_bytes)
@@ -529,7 +551,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             sm = torch.tensor(plan.slot_mapping[start:end], dtype=torch.long) if plan.slot_mapping else torch.arange(end-start, dtype=torch.long)
             # 注入
             self._inject_into_caches(fc, k_tensor, v_tensor, sm)
-            self._logger.debug("[v1_engine] loaded req=%s slice=[%d,%d) from %s", plan.req_id, start, end, file_path)
+            self._logger.info("[v1_engine] aggregate-load req=%s slice=[%d,%d) file=%s", plan.req_id, start, end, file_path)
         except Exception:
             self._logger.exception("_load_by_plan_slice failed for req=%s", plan.req_id)
 
@@ -597,7 +619,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 ext_data_len=0,
             )
             self._v1_meta.put_metadata(meta)
-            self._logger.debug("[v1_engine] stored req=%s slice=[%d,%d) -> %s", plan.req_id, start, end, file_path)
+            self._logger.info("[v1_engine] aggregate-store req=%s slice=[%d,%d) -> %s", plan.req_id, start, end, file_path)
         except Exception:
             self._logger.exception("_save_by_plan_slice failed for req=%s", plan.req_id)
 
@@ -991,7 +1013,7 @@ def v1_retrieve_kv(model_executable: Any, model_input: Any,
             sess = self._resolve_session_bytes(plan.req_id)
             tokens = torch.tensor(plan.token_ids[start:end], dtype=torch.long)
             slot = torch.tensor(plan.slot_mapping[start:end], dtype=torch.long)
-            if self._storage_mode == 'layered' and self._v1_layered is not None:
+            if getattr(self, '_storage_mode', 'aggregate') == 'layered' and getattr(self, '_v1_layered', None) is not None:
                 # 逐层写：有多少层刷多少层
                 flushed_any = False
                 for lid, item in list(bucket.items()):
@@ -1020,6 +1042,7 @@ def v1_retrieve_kv(model_executable: Any, model_input: Any,
                             ext_data_len=0,
                         )
                         self._v1_meta.put_metadata(meta)
+                        self._logger.info("[v1_engine] layered-store req=%s span=[%d,%d) layer=%d file=%s", plan.req_id, start, end, int(lid), file_path)
                         flushed_any = True
                         # 移除已刷项
                         bucket.pop(lid, None)
@@ -1076,6 +1099,7 @@ def v1_retrieve_kv(model_executable: Any, model_input: Any,
                     ext_data_len=0,
                 )
                 self._v1_meta.put_metadata(meta)
+                self._logger.info("[v1_engine] aggregate-store(pending) req=%s span=[%d,%d) -> %s", plan.req_id, start, end, file_path)
                 # 清理 pending
                 self._pending_store.pop(key, None)
                 return True
