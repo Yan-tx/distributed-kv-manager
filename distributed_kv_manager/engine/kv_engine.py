@@ -657,11 +657,20 @@ class KVEngine(DistributedKVEngineBase):
                             return
                         info = self._storage.extract_payload_info(kvb)
                         pm = info.get("payload_meta", {}) if isinstance(info, dict) else {}
-                        # prefer connector-provided token_offset
+                        # prefer connector-provided token_offset (absolute) and normalize
+                        # to the current sequence-relative offset
                         if isinstance(pm, dict) and "token_offset" in pm:
-                            offset = int(pm.get("token_offset", 0))
+                            try:
+                                abs_off = int(pm.get("token_offset", 0))
+                            except Exception:
+                                abs_off = 0
+                            # normalize to current sequence [0, seq_len)
+                            try:
+                                offset = int(abs_off) - int(start_pos)
+                            except Exception:
+                                offset = None
                         else:
-                            # try to infer from metadata token_idx if available
+                            # try to infer from metadata token_idx if available (absolute range "start-end")
                             offset = None
                             if meta_obj is not None:
                                 try:
@@ -672,6 +681,15 @@ class KVEngine(DistributedKVEngineBase):
                                     offset = None
                         if offset is None:
                             # cannot determine offset -> skip
+                            return
+                        # bounds check & clamp
+                        try:
+                            if offset < 0:
+                                # if the file starts before this sequence window, trim effective block later
+                                pass
+                            if offset >= seq_len:
+                                return
+                        except Exception:
                             return
                         try:
                             k_tensor, v_tensor = self._storage.unpack_kv_data(kvb)
@@ -690,10 +708,39 @@ class KVEngine(DistributedKVEngineBase):
                             block_len = 0
                         if block_len <= 0:
                             return
-                        # cap block_len to remaining seq_len
-                        if offset >= seq_len:
+                        # cap block_len to remaining seq_len, trimming for negative offsets
+                        try:
+                            eff_start = max(0, int(offset))
+                            # if offset < 0, we trim the front of the block accordingly
+                            front_trim = 0 if offset >= 0 else int(-offset)
+                            block_len = max(0, min(int(block_len - front_trim), int(seq_len - eff_start)))
+                            if block_len <= 0:
+                                return
+                            # If we trimmed the front, slice the stored tensors accordingly
+                            if front_trim > 0:
+                                try:
+                                    k_tensor = k_tensor[:, front_trim: front_trim + block_len]
+                                    v_tensor = v_tensor[:, front_trim: front_trim + block_len]
+                                except Exception:
+                                    return
+                        except Exception:
                             return
-                        block_len = min(block_len, seq_len - offset)
+                        # Strict per-block token hash verification (avoid mixing other prompts)
+                        try:
+                            pm_hash = None
+                            if isinstance(pm, dict):
+                                pm_hash = pm.get("tokens_hash", None)
+                            if pm_hash is not None:
+                                # compute hash of the current request tokens for this block window
+                                # slice uses the effective start and length
+                                cur_slice = current_tokens[eff_start: eff_start + block_len]
+                                cur_hash = self._tensor_hash(cur_slice)
+                                if pm_hash != cur_hash:
+                                    # skip blocks not matching current tokens
+                                    return
+                        except Exception:
+                            # if verification fails, conservatively skip this block
+                            return
                         # Prefer per-file persisted slot mapping if present
                         block_slots = None
                         try:
@@ -704,11 +751,16 @@ class KVEngine(DistributedKVEngineBase):
                                 import torch as _torch
                                 s = s.to(dtype=_torch.long)
                                 if int(s.numel()) != int(block_len):
-                                    s = _torch.arange(int(block_len), dtype=_torch.long)
+                                    # trim or pad fallback to ensure exact length
+                                    if int(s.numel()) > int(block_len):
+                                        s = s[:int(block_len)]
+                                    else:
+                                        s = _torch.arange(int(block_len), dtype=_torch.long)
                                 block_slots = s
                         except Exception:
                             block_slots = None
-                        blocks.append((offset, k_tensor, v_tensor, block_len, block_slots))
+                        # store with sequence-relative offset (effective start after clamp)
+                        blocks.append((eff_start, k_tensor, v_tensor, block_len, block_slots))
                     except Exception:
                         return
 
