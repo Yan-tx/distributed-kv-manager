@@ -345,19 +345,16 @@ class KVEngine(DistributedKVEngineBase):
             for layer_idx in range(num_layers):
                 kv_cache = kv_caches[layer_idx]
                 key_cache, value_cache = self.split_kv_cache(kv_cache)
-                if key_cache.dim() == 4:
-                    # 4D: per-batch contiguous tokens
-                    seq_k = key_cache[seq_idx]
-                    seq_v = value_cache[seq_idx]
-                    selected_k = seq_k[:min_take_len]
-                    selected_v = seq_v[:min_take_len]
-                elif key_cache.dim() == 3:
-                    # 3D (paged memory): use resolved slot mapping instead of naive slicing
-                    selected_indices = persisted_slots  # shape [min_take_len]
-                    selected_k = key_cache[selected_indices]
-                    selected_v = value_cache[selected_indices]
-                else:
+                # 统一视图：将 token 维度展平为 [-1, num_heads, head_dim]，再按槽位 gather
+                if key_cache.dim() < 3:
                     continue
+                num_heads = int(key_cache.shape[-2])
+                head_dim = int(key_cache.shape[-1])
+                key_view = key_cache.reshape(-1, num_heads, head_dim)
+                value_view = value_cache.reshape(-1, num_heads, head_dim)
+                selected_indices = persisted_slots  # shape [min_take_len]
+                selected_k = key_view[selected_indices]
+                selected_v = value_view[selected_indices]
                 all_keys.append(selected_k.unsqueeze(0))
                 all_values.append(selected_v.unsqueeze(0))
 
@@ -780,44 +777,31 @@ class KVEngine(DistributedKVEngineBase):
                         kv_cache = kv_caches[layer_idx]
                         key_cache, value_cache = self.split_kv_cache(kv_cache)
 
-                        if key_cache.dim() == 4:
-                            if seq_idx >= key_cache.shape[0]:
-                                logger.error("seq_idx=%d 超过 batch 维度大小=%d", seq_idx, key_cache.shape[0])
-                                raise ValueError("Batch index out of range")
-                            write_start = int(offset)
-                            write_end = write_start + int(block_len)
-                            if write_start >= key_cache.shape[1]:
-                                continue
-                            if write_end > key_cache.shape[1]:
-                                write_end = int(key_cache.shape[1])
-                            write_len = write_end - write_start
-                            if write_len <= 0:
-                                continue
-                            key_cache[seq_idx, write_start:write_end] = layer_k[:write_len].to(key_cache.dtype)
-                            value_cache[seq_idx, write_start:write_end] = layer_v[:write_len].to(value_cache.dtype)
-                        elif key_cache.dim() == 3:
-                            # slots_to_use 对应整个序列的槽位，此处按 offset 切片后映射
-                            try:
-                                slice_slots = current_slots[offset: offset + block_len]
-                            except Exception:
-                                slice_slots = current_slots
-                            # If per-file persisted slots exist, prefer them to avoid misalignment
-                            try:
-                                import torch as _torch
-                                if 'block_slots' in locals() and block_slots is not None:
-                                    slice_slots = block_slots.to(dtype=_torch.long, device=input_tokens.device)
-                            except Exception:
-                                pass
-                            if layer_k.shape[0] < slice_slots.numel():
-                                logger.warning("块的 KV 长度小于目标槽位数，尝试按最小长度写回")
-                            limit = min(int(layer_k.shape[0]), int(slice_slots.numel()))
-                            if limit <= 0:
-                                continue
-                            key_cache[slice_slots[:limit]] = layer_k[:limit].to(key_cache.dtype)
-                            value_cache[slice_slots[:limit]] = layer_v[:limit].to(value_cache.dtype)
-                        else:
+                        if key_cache.dim() < 3:
                             logger.error("无法识别的KV缓存形状(写回): %s", key_cache.shape)
                             raise ValueError("Unsupported KV cache layout")
+                        # 统一视图：展平 token 维度为 [-1, num_heads, head_dim]
+                        num_heads = int(key_cache.shape[-2])
+                        head_dim = int(key_cache.shape[-1])
+                        key_view = key_cache.reshape(-1, num_heads, head_dim)
+                        value_view = value_cache.reshape(-1, num_heads, head_dim)
+                        # 选择槽位：优先使用每文件持久化的 block_slots
+                        try:
+                            import torch as _torch
+                            slice_slots = (block_slots
+                                           if block_slots is not None
+                                           else current_slots[offset: offset + block_len])
+                            slice_slots = slice_slots.to(dtype=_torch.long, device=input_tokens.device)
+                        except Exception:
+                            slice_slots = current_slots
+                        # 写回（按最小可写长度）
+                        if layer_k.shape[0] < slice_slots.numel():
+                            logger.warning("块的 KV 长度小于目标槽位数，尝试按最小长度写回")
+                        limit = min(int(layer_k.shape[0]), int(slice_slots.numel()))
+                        if limit <= 0:
+                            continue
+                        key_view[slice_slots[:limit]] = layer_k[:limit].to(key_view.dtype)
+                        value_view[slice_slots[:limit]] = layer_v[:limit].to(value_view.dtype)
 
                     restored_tokens_for_seq += int(block_len)
 
