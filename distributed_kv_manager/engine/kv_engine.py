@@ -346,13 +346,16 @@ class KVEngine(DistributedKVEngineBase):
                 kv_cache = kv_caches[layer_idx]
                 key_cache, value_cache = self.split_kv_cache(kv_cache)
                 if key_cache.dim() == 4:
+                    # 4D: per-batch contiguous tokens
                     seq_k = key_cache[seq_idx]
                     seq_v = value_cache[seq_idx]
                     selected_k = seq_k[:min_take_len]
                     selected_v = seq_v[:min_take_len]
                 elif key_cache.dim() == 3:
-                    selected_k = key_cache[start_pos:start_pos + min_take_len]
-                    selected_v = value_cache[start_pos:start_pos + min_take_len]
+                    # 3D (paged memory): use resolved slot mapping instead of naive slicing
+                    selected_indices = persisted_slots  # shape [min_take_len]
+                    selected_k = key_cache[selected_indices]
+                    selected_v = value_cache[selected_indices]
                 else:
                     continue
                 all_keys.append(selected_k.unsqueeze(0))
@@ -647,7 +650,7 @@ class KVEngine(DistributedKVEngineBase):
             #   并从每个文件的 payload_meta 中读取 token_offset/block_size，若存在则用于排序和写回。
             # - 如果只有单个文件也可走同一路径。
             try:
-                blocks = []  # list of (offset, key_tensor, value_tensor, block_len)
+                blocks = []  # list of (offset, key_tensor, value_tensor, block_len, block_slots)
 
                 # Helper to add one file's payload if compatible
                 def _collect_from_file(rel_path, meta_obj=None):
@@ -694,7 +697,21 @@ class KVEngine(DistributedKVEngineBase):
                         if offset >= seq_len:
                             return
                         block_len = min(block_len, seq_len - offset)
-                        blocks.append((offset, k_tensor, v_tensor, block_len))
+                        # Prefer per-file persisted slot mapping if present
+                        block_slots = None
+                        try:
+                            if isinstance(info, dict) and "slot_mapping" in info:
+                                s = info["slot_mapping"]
+                                if hasattr(s, 'dim') and s.dim() > 1:
+                                    s = s.reshape(-1)
+                                import torch as _torch
+                                s = s.to(dtype=_torch.long)
+                                if int(s.numel()) != int(block_len):
+                                    s = _torch.arange(int(block_len), dtype=_torch.long)
+                                block_slots = s
+                        except Exception:
+                            block_slots = None
+                        blocks.append((offset, k_tensor, v_tensor, block_len, block_slots))
                     except Exception:
                         return
 
@@ -750,7 +767,7 @@ class KVEngine(DistributedKVEngineBase):
                 # 按 offset 排序并逐块写回到 kv_caches
                 blocks.sort(key=lambda x: int(x[0]))
                 restored_tokens_for_seq = 0
-                for offset, k_tensor, v_tensor, block_len in blocks:
+                for offset, k_tensor, v_tensor, block_len, block_slots in blocks:
                     # move to device
                     k_tensor = k_tensor.to(input_tokens.device)
                     v_tensor = v_tensor.to(input_tokens.device)
@@ -784,6 +801,13 @@ class KVEngine(DistributedKVEngineBase):
                                 slice_slots = current_slots[offset: offset + block_len]
                             except Exception:
                                 slice_slots = current_slots
+                            # If per-file persisted slots exist, prefer them to avoid misalignment
+                            try:
+                                import torch as _torch
+                                if 'block_slots' in locals() and block_slots is not None:
+                                    slice_slots = block_slots.to(dtype=_torch.long, device=input_tokens.device)
+                            except Exception:
+                                pass
                             if layer_k.shape[0] < slice_slots.numel():
                                 logger.warning("块的 KV 长度小于目标槽位数，尝试按最小长度写回")
                             limit = min(int(layer_k.shape[0]), int(slice_slots.numel()))
