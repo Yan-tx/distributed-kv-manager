@@ -134,6 +134,21 @@ def _capture_blocks(model, input_ids, kv_caches, attn_metadata):
             small_mi.session_id = None
             small_mi.layer_id = None
 
+            # Attach per-block payload meta so the engine/retriever can
+            # place each stored chunk at the correct global token offset.
+            # This mirrors the richer connector path and enables correct
+            # aggregation of multiple blocks during retrieve.
+            try:
+                small_mi.payload_meta = {
+                    "token_offset": int(start_pos + blk_start),
+                    "block_index": int(blk_idx),
+                    "block_size": int(blk_len),
+                    "total_tokens": int(seq_len),
+                }
+            except Exception:
+                # Best-effort; if something goes wrong, proceed without extra meta
+                pass
+
             try:
                 store_status = should_store(small_mi)
             except Exception:
@@ -143,6 +158,11 @@ def _capture_blocks(model, input_ids, kv_caches, attn_metadata):
                 # model passed as model_executable parameter
                 store_kv(None, None, None, model, small_mi, block_kv_caches, store_status)
                 logger.info("[minimal_hooks] stored block idx=%d range=[%d,%d) len=%d key=%s", blk_idx, blk_start, blk_end, blk_len, file_key)
+                try:
+                    import sys as _sys
+                    _sys.stderr.write(f"[minimal_hooks] stored block idx={blk_idx} range=[{blk_start},{blk_end}) len={blk_len} key={file_key}\n")
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error("[minimal_hooks] store_kv failed: %s", e, exc_info=True)
 
@@ -171,10 +191,20 @@ def inject_minimal_llama():
 
     setattr(llama_mod.LlamaModel, "forward", wrapped_forward)
     logger.info("minimal_hooks: injected LlamaModel.forward wrapper for block capture")
+    try:
+        import sys as _sys
+        _sys.stderr.write("[minimal_hooks] patched LlamaModel.forward\n")
+    except Exception:
+        pass
 
 
 def inject():
     inject_minimal_llama()
+    try:
+        import sys as _sys
+        _sys.stderr.write("[minimal_hooks] inject() called\n")
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':

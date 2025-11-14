@@ -17,6 +17,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+import sys as _sys  # diag
+try: _sys.stderr.write(f"[dkv.connector] module import: STORE_AFTER_PREFILL={STORE_AFTER_PREFILL} ALLOW_PARTIAL_PREFILL_STORE={ALLOW_PARTIAL_PREFILL_STORE} BLOCK_SIZE={BLOCK_SIZE}\\n")
+except Exception: pass
+# Force connector-side per-block persistence during prefill so we don't rely on
+# external injection. These assignments override the defaults above at import
+# time and will be read when the connector is constructed.
+STORE_AFTER_PREFILL = False
+ALLOW_PARTIAL_PREFILL_STORE = True
+
 class DistributedKVConnector(KVConnectorBase):
     """
     DistributedKVConnector
@@ -38,8 +47,8 @@ class DistributedKVConnector(KVConnectorBase):
         # 硬编码开关（不从配置读取，便于调试）
         self._store_after_prefill = STORE_AFTER_PREFILL
         self._allow_partial_prefill_store = ALLOW_PARTIAL_PREFILL_STORE
-        logger.info(f"[connector] store_after_prefill(hardcoded)={self._store_after_prefill}")
-        logger.info(f"[connector] allow_partial_prefill_store(hardcoded)={self._allow_partial_prefill_store}")
+        logger.info(f"[connector] store_after_prefill(hardcoded)={self._store_after_prefill}"); __import__("sys").stderr.write(f"[connector] store_after_prefill={self._store_after_prefill}\n")
+        logger.info(f"[connector] allow_partial_prefill_store(hardcoded)={self._allow_partial_prefill_store}"); __import__("sys").stderr.write(f"[connector] allow_partial_prefill_store={self._allow_partial_prefill_store}\n")
         # 预填延迟计数（避免永远跳过）：按文件键统计尝试次数
         self._prefill_attempts = {}
         # 预填块统计与日志开关
@@ -284,7 +293,7 @@ class DistributedKVConnector(KVConnectorBase):
                                 self._last_performed_block_store = True
                             except Exception:
                                 pass
-                            logger.info("[connector] stored block idx=%d range=[%d,%d) len=%d key=%s", blk_idx, blk_start, blk_end, blk_len, file_key)
+                            __import__("sys").stderr.write(f"[connector] stored block idx={blk_idx} range=[{blk_start},{blk_end}) len={blk_len} key={file_key}\n"); logger.info("[connector] stored block idx=%d range=[%d,%d) len=%d key=%s", blk_idx, blk_start, blk_end, blk_len, file_key)
                         except Exception as e:
                             logger.exception("[connector] block store failed: %s", e)
 

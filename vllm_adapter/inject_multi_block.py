@@ -216,6 +216,11 @@ def inject():
     setattr(mr.ModelRunner, "execute_model", wrapped_execute_model)
     _patched = True
     logger.info("inject_multi_block: patched ModelRunner.execute_model (minimal multi-block injector)")
+    try:
+        import sys as _sys
+        _sys.stderr.write("[inject_mb] patched ModelRunner.execute_model\n")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
