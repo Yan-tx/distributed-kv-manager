@@ -246,6 +246,22 @@ class DistributedKVConnector(KVConnectorBase):
                                     sa.slot_mapping = orig_slot[seq_idx][:blk_len]
                         except Exception:
                             sa.slot_mapping = torch.arange(blk_len)
+
+                        # normalize slot mapping to 1D Long with exact blk_len
+                        try:
+                            sm = sa.slot_mapping
+                            dev = getattr(current_tokens, 'device', None)
+                            if not isinstance(sm, torch.Tensor):
+                                sm = torch.as_tensor(sm, dtype=torch.long, device=dev)
+                            else:
+                                sm = sm.to(dtype=torch.long, device=dev)
+                            if sm.dim() > 1:
+                                sm = sm.reshape(-1)
+                            if int(sm.numel()) != int(blk_len):
+                                sm = torch.arange(blk_len, dtype=torch.long, device=dev)
+                            sa.slot_mapping = sm
+                        except Exception:
+                            sa.slot_mapping = torch.arange(blk_len, dtype=torch.long, device=getattr(current_tokens, 'device', None))
                         small_mi.attn_metadata = sa
                         small_mi.session_id = session_id
                         small_mi.layer_id = layer_id

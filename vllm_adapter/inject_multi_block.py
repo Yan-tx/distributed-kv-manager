@@ -58,25 +58,33 @@ def inject():
     if _patched:
         return
 
-    # Prefer to use the repo-local minimal hooks implementation if available
-    try:
-        # try package-qualified import first
+    import os as _os
+    mode = str(_os.environ.get("DKV_INJECTOR", "auto")).lower()
+    force_multi = str(_os.environ.get("DKV_FORCE_MULTI", "0")).lower() in ("1","true","yes","on")
+
+    # If user explicitly asked for multi, skip minimal_hooks path
+    use_minimal = (mode in ("auto", "minimal")) and not force_multi
+
+    if use_minimal:
+        # Prefer to use the repo-local minimal hooks implementation if available
         try:
-            from vllm_adapter import minimal_hooks as mh
+            # try package-qualified import first
+            try:
+                from vllm_adapter import minimal_hooks as mh
+            except Exception:
+                # fallback to local import
+                import minimal_hooks as mh
+            logger.info("inject_multi_block: found minimal_hooks, calling inject() to install hooks")
+            try:
+                mh.inject()
+                _patched = True
+                return
+            except Exception as e:
+                logger.warning("inject_multi_block: minimal_hooks.inject failed: %s", e)
+                # fall through to lightweight patch
         except Exception:
-            # fallback to local import
-            import minimal_hooks as mh
-        logger.info("inject_multi_block: found minimal_hooks, calling inject() to install hooks")
-        try:
-            mh.inject()
-            _patched = True
-            return
-        except Exception as e:
-            logger.warning("inject_multi_block: minimal_hooks.inject failed: %s", e)
-            # fall through to lightweight patch
-    except Exception:
-        # minimal_hooks not available; continue with lightweight patch
-        pass
+            # minimal_hooks not available; continue with lightweight patch
+            pass
 
     try:
         import vllm.worker.model_runner as mr
@@ -185,9 +193,37 @@ def inject():
                                 sa.slot_mapping = orig_slot[seq_idx][:blk_len]
                     except Exception:
                         sa.slot_mapping = torch.arange(blk_len)
+
+                    # normalize slot mapping to 1D Long with exact blk_len
+                    try:
+                        sm = sa.slot_mapping
+                        dev = getattr(current_tokens, 'device', None)
+                        if not isinstance(sm, torch.Tensor):
+                            sm = torch.as_tensor(sm, dtype=torch.long, device=dev)
+                        else:
+                            sm = sm.to(dtype=torch.long, device=dev)
+                        if sm.dim() > 1:
+                            sm = sm.reshape(-1)
+                        if sm.numel() != blk_len:
+                            sm = torch.arange(blk_len, dtype=torch.long, device=dev)
+                        sa.slot_mapping = sm
+                    except Exception:
+                        sa.slot_mapping = torch.arange(blk_len, dtype=torch.long, device=getattr(current_tokens, 'device', None))
                     small_mi.attn_metadata = sa
                     small_mi.session_id = session_id
                     small_mi.layer_id = layer_id
+
+                    # Attach minimal payload_meta so engine can embed token_offset
+                    # into metadata for correct aggregation during retrieve.
+                    try:
+                        small_mi.payload_meta = {
+                            "token_offset": int(start_pos + blk_start),
+                            "block_index": int(blk_idx),
+                            "block_size": int(blk_len),
+                            "total_tokens": int(seq_len),
+                        }
+                    except Exception:
+                        pass
 
                     # compute store_status (engine-level policy)
                     try:
