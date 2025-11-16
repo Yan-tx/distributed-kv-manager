@@ -168,6 +168,30 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     prefix,
                     self._v1_kv_expire_time,
                 )
+                # 可选：基于 last_access 预取部分热点 hash 到 DRAM 缓存
+                try:
+                    enable_prefetch = bool(
+                        getattr(self._kv_transfer_config, "enable_prefetch", False)
+                    )
+                    top_k = int(
+                        getattr(self._kv_transfer_config, "v1_prefetch_top_k", 0) or 0
+                    )
+                except Exception:
+                    enable_prefetch = False
+                    top_k = 0
+                if enable_prefetch and top_k > 0:
+                    import threading
+
+                    t = threading.Thread(
+                        target=self._run_initial_prefetch,
+                        args=(top_k,),
+                        daemon=True,
+                    )
+                    t.start()
+                    logger.info(
+                        "[v1_engine] scheduled initial v1 prefetch for top_k=%d hashes",
+                        top_k,
+                    )
             except Exception:
                 self._v1_meta = None
                 self._v1_kv_expire_time = 0
@@ -606,6 +630,81 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             except Exception:
                 pass
         return foldername
+
+    def _run_initial_prefetch(self, top_k: int) -> None:
+        """一次性预取最近访问的部分 hash 到 DRAM Cache（按 last_access 排序）。"""
+        if self._v1_meta is None or self._v1_storage is None:
+            return
+        try:
+            metas = self._v1_meta.scan_by_session_layer(session_id=None, layer_id=None)
+        except Exception:
+            return
+        valid: list[Any] = []
+        for m in metas:
+            try:
+                if getattr(m, "status", 0) != 1:
+                    continue
+                if m.is_expired():
+                    continue
+                valid.append(m)
+            except Exception:
+                continue
+        if not valid:
+            logger.info("[v1_engine] prefetch: no valid metadata entries found")
+            return
+        try:
+            valid.sort(key=lambda m: getattr(m, "last_access", 0), reverse=True)
+        except Exception:
+            pass
+        selected = valid[: int(top_k)]
+        logger.info(
+            "[v1_engine] prefetch: top_k=%d, actual=%d",
+            int(top_k),
+            len(selected),
+        )
+        for m in selected:
+            folder_abs = getattr(m, "file_path", None)
+            if not folder_abs:
+                continue
+            hash_id = os.path.basename(str(folder_abs))
+            if not hash_id:
+                continue
+            try:
+                self._prefetch_hash_layers(hash_id)
+            except Exception:
+                continue
+
+    def _prefetch_hash_layers(self, hash_id: str) -> None:
+        """针对某个 hash 目录，遍历已有的 layer 文件并触发一次下载以填充 DRAM Cache。"""
+        if self._v1_storage is None:
+            return
+        base_local = getattr(self._kv_transfer_config, "local_dir", None)
+        base_remote = getattr(self._kv_transfer_config, "remote_dir", None) or getattr(
+            self._kv_transfer_config, "crail_dir", None
+        )
+        roots: list[str] = []
+        for base in (base_local, base_remote):
+            if not base:
+                continue
+            root = os.path.join(str(base), hash_id)
+            if os.path.isdir(root):
+                roots.append(root)
+        if not roots:
+            return
+        seen: set[str] = set()
+        for root in roots:
+            for fn in os.listdir(root):
+                    if not fn.endswith(".safetensors"):
+                        continue
+                    rel_path = os.path.join(hash_id, fn)
+                    if rel_path in seen:
+                        continue
+                    seen.add(rel_path)
+                    try:
+                        # 调用 download 即可触发 CachingStorage 将 bytes 写入内存缓存
+                        _ = self._v1_storage.download(rel_path)
+                    except Exception:
+                        continue
 
     def _generate_filename_debug(
         self,

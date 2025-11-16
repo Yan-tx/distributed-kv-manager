@@ -67,7 +67,14 @@ class StorageFactory:
         cache_dir = _get("ssd_cache_dir", "/tmp/ssd_cache")
         enable_prefetch = bool(_get("enable_prefetch", True))
         cache_mode = _get("cache_mode", None)  # none | only_mem | mem_and_ssd
+        # 内存缓存容量：优先支持 GB 配置，其次兼容旧的 bytes 配置
         mem_capacity_bytes = int(_get("mem_cache_capacity_bytes", 256 * 1024 * 1024))
+        mem_capacity_gb = _get("mem_cache_capacity_gb", None)
+        if mem_capacity_gb is not None:
+            try:
+                mem_capacity_bytes = int(float(mem_capacity_gb) * 1024 * 1024 * 1024)
+            except Exception:
+                pass
 
         logger.info(
             "创建存储实例: storage_type=%s, enable_caching=%s, cache_dir=%s",
@@ -241,4 +248,3 @@ class StorageFactory:
         else:
             logger.warning("未知 cache_mode: %s，返回基础存储", cache_mode)
             return base_storage
-
