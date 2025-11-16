@@ -1,22 +1,23 @@
 from __future__ import annotations
 
+import time
 from typing import List, Optional
 
 from distributed_kv_manager.metadata.etcd import KVMetadata, KVMetadataManager
-from distributed_kv_manager.metadata.metadata_cache import MetadataCache
 
 
 class V1MetadataClient:
     """v1 外部 KV 的元数据访问封装。
 
-    基于 KVMetadataManager + MetadataCache，提供：
-    - hash_exists: 判断某个 hash 目录是否有有效 KV 缓存
-    - mark_hash_stored: 在完成一次 STORE 后写入聚合元数据
+    只依赖 KVMetadataManager，不使用本地三层缓存，避免与外部清理脚本状态不一致。
+
+    提供：
+    - hash_exists: 判断某个 hash 目录是否存在有效 KV 记录；
+    - mark_hash_stored: 在完成一次 STORE 后写入聚合元数据。
     """
 
     def __init__(self, manager: KVMetadataManager, default_expire: int = 0) -> None:
         self._manager = manager
-        self._cache = MetadataCache(meta_manager=self._manager)
         self._default_expire = int(default_expire or 0)
 
     def get_metadata(
@@ -25,31 +26,32 @@ class V1MetadataClient:
         layer_id: Optional[int] = None,
         session_id: Optional[bytes] = None,
     ) -> Optional[KVMetadata]:
-        """从三层缓存 + etcd 获取一条元数据。"""
-        return self._cache.get_metadata(
-            key=key,
-            layer_id=layer_id,
-            session_id=session_id,
-        )
+        """直接从 etcd 获取一条元数据（不经过本地缓存）。"""
+        _ = layer_id, session_id
+        return self._manager.get_metadata(key)
 
     def put_metadata(self, meta: KVMetadata) -> None:
-        """写入元数据到缓存，并异步刷入 etcd。"""
-        self._cache.put_metadata(meta)
+        """写入元数据到 etcd。"""
+        self._manager.put_metadata(meta.file_path, meta, replicate=True)
 
     def update_access_time(self, key: str) -> None:
-        """更新某条记录的 last_access 并异步写回。"""
-        self._cache.update_access_time(key)
+        """更新某条记录的 last_access 并同步写回 etcd。"""
+        meta = self._manager.get_metadata(key)
+        if meta is None:
+            return
+        meta.last_access = int(time.time())
+        self._manager.put_metadata(key, meta, replicate=True)
 
     # ---- v1 专用 helper：按 hash 目录维护存在性 / 聚合记录 ----
 
     def hash_exists(self, folder_abs: str) -> bool:
-        """判断某个 hash 目录是否存在有效的 KV（status==1 且未过期）。"""
+        """判断某个 hash 目录是否存在有效 KV（status==1 且未过期）。"""
         meta = self.get_metadata(key=folder_abs)
         if meta is None or getattr(meta, "status", 0) != 1:
             return False
         if meta.is_expired():
             return False
-        # 刷新访问时间（异步写回）
+        # 刷新访问时间（同步写回）
         self.update_access_time(folder_abs)
         return True
 
@@ -60,9 +62,7 @@ class V1MetadataClient:
         file_size: int,
     ) -> None:
         """为某个 hash 目录写入一条聚合元数据记录。"""
-        import time as _time
-
-        now = int(_time.time())
+        now = int(time.time())
         expire = int(self._default_expire or 0)
         session_id = b"v1_external_kv__"  # 16B 占位
         layer_id = 0  # v1 聚合 entry 统一用 0 作为占位
@@ -85,7 +85,7 @@ class V1MetadataClient:
         )
         self.put_metadata(meta)
 
-    # ---- 通用扫描接口：目前 v1 不强依赖，可用于调试 ----
+    # ---- 通用扫描接口：目前主要用于调试 ----
 
     def scan_by_session_layer(
         self,
@@ -121,9 +121,6 @@ class V1MetadataClient:
         return out
 
     def stop(self) -> None:
-        """停止内部缓存的后台线程。"""
-        try:
-            self._cache.stop()
-        except Exception:
-            pass
+        """v1 当前没有内部后台线程，保留接口仅为对齐。"""
+        return
 
