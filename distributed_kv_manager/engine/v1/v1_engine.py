@@ -14,6 +14,7 @@ from .base import (
     KVConnectorRole,
 )
 from distributed_kv_manager.storage.v1.storage import create_v1_storage, V1Storage
+from distributed_kv_manager.config_loader import load_config_from_json
 
 try:
     from vllm.logger import init_logger as _vllm_init_logger  # type: ignore
@@ -350,20 +351,38 @@ class V1KVEngineImpl(KVConnectorBase_V1):
 
     # ---------------- helpers ----------------
     def _resolve_dkv_path(self, vllm_config: Any) -> Optional[str]:
+        """优先从 kv_transfer_config / config.json 中解析 dkv_storage_path。"""
+        # 1) 先看 vllm_config.kv_transfer_config 上是否显式带了 dkv_storage_path
         try:
             kvt = getattr(vllm_config, 'kv_transfer_config', None)
-            if kvt is None:
-                return None
-            path = getattr(kvt, 'dkv_storage_path', None)
-            if path:
-                return str(path)
-            extra = getattr(kvt, 'extra_config', None)
-            if isinstance(extra, dict):
-                p = extra.get('dkv_storage_path')
-                if p:
-                    return str(p)
+            if kvt is not None:
+                path = getattr(kvt, 'dkv_storage_path', None)
+                if path:
+                    return str(path)
+                extra = getattr(kvt, 'extra_config', None)
+                if isinstance(extra, dict):
+                    p = extra.get('dkv_storage_path')
+                    if p:
+                        return str(p)
         except Exception:
             pass
+
+        # 2) 若上游未指定，则尝试从 config.json 读取 kv_transfer_config.dkv_storage_path
+        try:
+            cfg = load_config_from_json()
+            kvt_json = getattr(cfg, 'kv_transfer_config', None)
+            if kvt_json is not None:
+                path = getattr(kvt_json, 'dkv_storage_path', None)
+                if path:
+                    return str(path)
+                # 回退到 storage_dir/local_dir
+                path2 = getattr(kvt_json, 'storage_dir', None) or getattr(kvt_json, 'local_dir', None)
+                if path2:
+                    return str(path2)
+        except Exception:
+            pass
+
+        # 3) 仍然解析失败，则交由调用方使用默认路径
         return None
 
     def _generate_foldername_debug(self, token_ids: torch.Tensor, mm_hashes: list[str], create_folder: bool = False) -> str:
