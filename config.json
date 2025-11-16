@@ -8,7 +8,7 @@
     "ssd_cache_dir": "/tmp/ssd_cache",
     "enable_prefetch": true,
     "v1_prefetch_top_k": 10,
-    "cache_mode": "only_mem",
+    "cache_mode": "none",
     "mem_cache_capacity_gb": 8,
     "kv_expire_time": 86400,
     "cleanup_interval": 3600,
