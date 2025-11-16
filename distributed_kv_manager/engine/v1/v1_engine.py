@@ -13,6 +13,7 @@ from .base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from distributed_kv_manager.storage.v1.storage import create_v1_storage, V1Storage
 
 try:
     from vllm.logger import init_logger as _vllm_init_logger  # type: ignore
@@ -94,8 +95,38 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             bs = 16
         self._block_size = int(bs)
         self._requests_need_load: dict[str, Any] = {}
+        # v1 共享存储根路径（后续会由 StorageFactory 接管）
         self._storage_path = self._resolve_dkv_path(vllm_config) or "/tmp/kvcache/v1"
         logger.info("[v1_engine] dkv_storage_path=%s", self._storage_path)
+
+        # Step A1: 初始化 v1 storage 封装，后续步骤再逐步替换 debug 目录读写逻辑
+        self._v1_storage: Optional[V1Storage]
+        try:
+            from types import SimpleNamespace
+
+            # 构造最小配置，指向与 debug 目录一致的根路径，统一通过 StorageFactory 创建后端
+            kvt_cfg = getattr(vllm_config, 'kv_transfer_config', None)
+            if kvt_cfg is not None and getattr(kvt_cfg, 'storage_dir', None) is None:
+                # 若上游未显式指定 storage_dir，则用 dkv_storage_path 覆盖
+                setattr(kvt_cfg, 'storage_dir', self._storage_path)
+                setattr(kvt_cfg, 'local_dir', getattr(kvt_cfg, 'local_dir', self._storage_path))
+
+            cfg = SimpleNamespace(
+                kv_transfer_config=(
+                    kvt_cfg
+                    if kvt_cfg is not None
+                    else SimpleNamespace(
+                        storage_type="local",
+                        storage_dir=self._storage_path,
+                        local_dir=self._storage_path,
+                    )
+                )
+            )
+            self._v1_storage = create_v1_storage(cfg)
+            logger.info("[v1_engine] v1_storage backend initialized for %s", self._storage_path)
+        except Exception:
+            # 存储初始化失败时仍保留 debug 目录路径，后续步骤再细化错误处理
+            self._v1_storage = None
 
     # ---------------- Worker-side ----------------
     def start_load_kv(self, forward_context: Any, **kwargs) -> None:
@@ -118,11 +149,33 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 if kv_cache_attr is None:
                     continue
                 kv_cache_layer = kv_cache_attr[getattr(forward_context, 'virtual_engine', 0)]
-                filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
-                try:
-                    kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
-                except Exception:
-                    continue
+                kv_cache = None
+
+                # A2: 优先尝试通过 V1Storage 读取统一格式 payload
+                if self._v1_storage is not None:
+                    try:
+                        folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=False)
+                        folder_rel = os.path.basename(folder_abs)
+                        rel_path = os.path.join(folder_rel, f"{layer_name}.pt")
+                        raw = self._v1_storage.download(rel_path)
+                        if raw is not None:
+                            k_tensor, v_tensor = self._v1_storage.unpack_kv_data(raw)
+                            if k_tensor is not None and v_tensor is not None:
+                                # 期望形状 [num_layers, num_tokens, ...]，取第 0 层
+                                if k_tensor.dim() >= 2:
+                                    k_layer = k_tensor[0]
+                                    v_layer = v_tensor[0]
+                                    kv_cache = torch.stack([k_layer, v_layer], dim=0)
+                    except Exception:
+                        kv_cache = None
+
+                # 回退：使用原 safetensors 路径
+                if kv_cache is None:
+                    filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
+                    try:
+                        kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
+                    except Exception:
+                        continue
                 _inject_kv_into_layer(kv_cache_layer, kv_cache, req.slot_mapping, attn_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -141,8 +194,49 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         for req in metadata.requests:
             if not req.is_store:
                 continue
-            filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
+            # 提取当前层的 KV 切片
             kv_cache = _extract_kv_from_layer(kv_layer, req.slot_mapping, attn_metadata)
+
+            # A2: 使用 V1Storage 以统一 pack_full_payload 与 upload
+            if self._v1_storage is not None:
+                try:
+                    if kv_cache.dim() >= 2 and kv_cache.size(0) == 2:
+                        k_cache = kv_cache[0].unsqueeze(0)  # [1, num_tokens, ...]
+                        v_cache = kv_cache[1].unsqueeze(0)
+                    else:
+                        k_cache = kv_cache.unsqueeze(0)
+                        v_cache = kv_cache.unsqueeze(0)
+
+                    input_tokens = req.token_ids
+                    roi = torch.ones(input_tokens.shape[0], dtype=torch.bool, device=input_tokens.device)
+                    slot_mapping = req.slot_mapping
+                    payload_meta = {
+                        "schema_version": 1,
+                        "num_layers": int(k_cache.shape[0]),
+                        "kv_dtype": str(k_cache.dtype),
+                        "kv_tail_shape": list(k_cache.shape[2:]),
+                        "slots_len": int(slot_mapping.numel()),
+                    }
+                    # 相对路径：<hash>/<layer>.pt
+                    folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=True)
+                    folder_rel = os.path.basename(folder_abs)
+                    rel_path = os.path.join(folder_rel, f"{layer_name}.pt")
+
+                    data = self._v1_storage.pack_full_payload(
+                        k_cache=k_cache,
+                        v_cache=v_cache,
+                        input_tokens=input_tokens,
+                        roi=roi,
+                        slot_mapping=slot_mapping,
+                        payload_meta=payload_meta,
+                    )
+                    self._v1_storage.upload(rel_path, data)
+                except Exception:
+                    # 统一打包失败时退回 safetensors 路径
+                    pass
+
+            # 兼容：保留原有 safetensors 写入调试路径
+            filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
             tensors = {"kv_cache": kv_cache.detach().cpu()}
             try:
                 safetensors.torch.save_file(tensors, filename)
@@ -348,4 +442,3 @@ def v1_should_retrieve(model_input: Any) -> Any:
 def v1_retrieve_kv(model_executable: Any, model_input: Any,
                    kv_caches: list[torch.Tensor], retrieve_status: Any) -> Any:
     return None
-
