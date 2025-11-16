@@ -99,34 +99,53 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         self._storage_path = self._resolve_dkv_path(vllm_config) or "/tmp/kvcache/v1"
         logger.info("[v1_engine] dkv_storage_path=%s", self._storage_path)
 
-        # Step A1: 初始化 v1 storage 封装，后续步骤再逐步替换 debug 目录读写逻辑
+        # Step A1: 初始化 v1 storage 封装（统一从 config.json 读取存储配置）
         self._v1_storage: Optional[V1Storage]
         try:
             from types import SimpleNamespace
 
-            # 构造最小配置，指向与 debug 目录一致的根路径，统一通过 StorageFactory 创建后端
-            kvt_cfg = getattr(vllm_config, 'kv_transfer_config', None)
-            if kvt_cfg is not None and getattr(kvt_cfg, 'storage_dir', None) is None:
-                # 若上游未显式指定 storage_dir，则用 dkv_storage_path 覆盖
-                setattr(kvt_cfg, 'storage_dir', self._storage_path)
-                setattr(kvt_cfg, 'local_dir', getattr(kvt_cfg, 'local_dir', self._storage_path))
+            # 1) 优先从项目根目录的 config.json 读取 kv_transfer_config
+            try:
+                cfg_json = load_config_from_json()
+                kvt_json = getattr(cfg_json, "kv_transfer_config", None)
+            except Exception:
+                kvt_json = None
 
-            cfg = SimpleNamespace(
-                kv_transfer_config=(
-                    kvt_cfg
-                    if kvt_cfg is not None
-                    else SimpleNamespace(
+            if kvt_json is not None:
+                # 补齐 storage_dir/local_dir 默认值，指向 self._storage_path
+                if getattr(kvt_json, "storage_dir", None) is None:
+                    setattr(kvt_json, "storage_dir", self._storage_path)
+                if getattr(kvt_json, "local_dir", None) is None:
+                    setattr(kvt_json, "local_dir", self._storage_path)
+                effective_kvt = kvt_json
+            else:
+                # 如果没有 config.json，就退回 vLLM 自带的 kv_transfer_config
+                kvt_cfg = getattr(vllm_config, "kv_transfer_config", None)
+                if kvt_cfg is not None:
+                    if getattr(kvt_cfg, "storage_dir", None) is None:
+                        setattr(kvt_cfg, "storage_dir", self._storage_path)
+                    if getattr(kvt_cfg, "local_dir", None) is None:
+                        setattr(kvt_cfg, "local_dir", self._storage_path)
+                    effective_kvt = kvt_cfg
+                else:
+                    # 双重兜底：完全没有配置时仍然走 local
+                    effective_kvt = SimpleNamespace(
                         storage_type="local",
                         storage_dir=self._storage_path,
                         local_dir=self._storage_path,
                     )
-                )
-            )
+
+            cfg = SimpleNamespace(kv_transfer_config=effective_kvt)
             self._v1_storage = create_v1_storage(cfg)
-            logger.info("[v1_engine] v1_storage backend initialized for %s", self._storage_path)
+            logger.info(
+                "[v1_engine] v1_storage backend initialized for %s (storage_type=%s)",
+                self._storage_path,
+                getattr(effective_kvt, "storage_type", "local"),
+            )
         except Exception:
             # 存储初始化失败时仍保留 debug 目录路径，后续步骤再细化错误处理
             self._v1_storage = None
+
 
     # ---------------- Worker-side ----------------
     def start_load_kv(self, forward_context: Any, **kwargs) -> None:
