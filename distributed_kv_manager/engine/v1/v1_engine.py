@@ -152,16 +152,17 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 kv_cache = None
 
                 # 优先通过存储后端读取 safetensors bytes，再原样反序列化
-                folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=False)
+                folder_abs = self._generate_foldername_debug(
+                    req.token_ids, req.mm_hashes, create_folder=False
+                )
                 folder_rel = os.path.basename(folder_abs)
                 rel_path = os.path.join(folder_rel, f"{layer_name}.safetensors")
                 if self._v1_storage is not None:
                     try:
                         raw = self._v1_storage.download(rel_path)
                         if raw is not None:
-                            import io as _io
-                            buf = _io.BytesIO(raw)
-                            kv_cache = safetensors.torch.load_file(buf)["kv_cache"].cuda()
+                            # safetensors 支持直接从 bytes 反序列化
+                            kv_cache = safetensors.torch.load(raw)["kv_cache"].cuda()
                     except Exception:
                         kv_cache = None
 
@@ -194,18 +195,21 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             kv_cache = _extract_kv_from_layer(kv_layer, req.slot_mapping, attn_metadata)
 
             # 仅保留 safetensors 形式，直接由存储后端管理字节
-            folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=False)
+            folder_abs = self._generate_foldername_debug(
+                req.token_ids, req.mm_hashes, create_folder=False
+            )
             folder_rel = os.path.basename(folder_abs)
             rel_path = os.path.join(folder_rel, f"{layer_name}.safetensors")
 
-            # 序列化为 safetensors bytes
-            import io as _io
-            buf = _io.BytesIO()
-            safetensors.torch.save_file({"kv_cache": kv_cache.detach().cpu()}, buf)
-            data = buf.getvalue()
+            # 序列化为 safetensors bytes（内存缓冲）
+            try:
+                data = safetensors.torch.save({"kv_cache": kv_cache.detach().cpu()})
+            except Exception:
+                # 如果内存序列化失败，就不尝试后端上传，直接退回本地 safetensors
+                data = None
 
             # 通过 v1_storage 落盘；若不存在则直接写本地文件作为兜底
-            if self._v1_storage is not None:
+            if self._v1_storage is not None and data is not None:
                 ok = False
                 try:
                     ok = self._v1_storage.upload(rel_path, data)
