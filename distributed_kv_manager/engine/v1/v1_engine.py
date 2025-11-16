@@ -151,21 +151,21 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 kv_cache_layer = kv_cache_attr[getattr(forward_context, 'virtual_engine', 0)]
                 kv_cache = None
 
-                # 优先尝试通过 V1Storage 读取 v1 单层 layout
+                # 优先通过存储后端读取 safetensors bytes，再原样反序列化
+                folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=False)
+                folder_rel = os.path.basename(folder_abs)
+                rel_path = os.path.join(folder_rel, f"{layer_name}.safetensors")
                 if self._v1_storage is not None:
                     try:
-                        folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=False)
-                        folder_rel = os.path.basename(folder_abs)
-                        rel_path = os.path.join(folder_rel, f"{layer_name}.pt")
                         raw = self._v1_storage.download(rel_path)
                         if raw is not None:
-                            kv_tensor, _info = self._v1_storage.unpack_layer_payload(raw)
-                            if kv_tensor is not None:
-                                kv_cache = kv_tensor.cuda()
+                            import io as _io
+                            buf = _io.BytesIO(raw)
+                            kv_cache = safetensors.torch.load_file(buf)["kv_cache"].cuda()
                     except Exception:
                         kv_cache = None
 
-                # 回退：使用原 safetensors 路径
+                # 回退：直接从本地路径读取 safetensors（调试/兼容）
                 if kv_cache is None:
                     filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
                     try:
@@ -193,41 +193,36 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             # 提取当前层的 KV 切片（保持 engine 内部原始形状）
             kv_cache = _extract_kv_from_layer(kv_layer, req.slot_mapping, attn_metadata)
 
-            # 使用 V1Storage v1 layout 以统一打包 / 上传
+            # 仅保留 safetensors 形式，直接由存储后端管理字节
+            folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=False)
+            folder_rel = os.path.basename(folder_abs)
+            rel_path = os.path.join(folder_rel, f"{layer_name}.safetensors")
+
+            # 序列化为 safetensors bytes
+            import io as _io
+            buf = _io.BytesIO()
+            safetensors.torch.save_file({"kv_cache": kv_cache.detach().cpu()}, buf)
+            data = buf.getvalue()
+
+            # 通过 v1_storage 落盘；若不存在则直接写本地文件作为兜底
             if self._v1_storage is not None:
+                ok = False
                 try:
-                    input_tokens = req.token_ids
-                    roi = torch.ones(input_tokens.shape[0], dtype=torch.bool, device=input_tokens.device)
-                    slot_mapping = req.slot_mapping
-                    payload_meta = {
-                        "schema_version": 1,
-                        "kv_dtype": str(kv_cache.dtype),
-                        "kv_tail_shape": list(kv_cache.shape[1:]) if kv_cache.dim() >= 2 else [],
-                        "slots_len": int(slot_mapping.numel()),
-                    }
-                    # 相对路径：<hash>/<layer>.pt
-                    folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=True)
-                    folder_rel = os.path.basename(folder_abs)
-                    rel_path = os.path.join(folder_rel, f"{layer_name}.pt")
-
-                    data = self._v1_storage.pack_layer_payload(
-                        kv_cache=kv_cache,
-                        input_tokens=input_tokens,
-                        slot_mapping=slot_mapping,
-                        payload_meta=payload_meta,
-                    )
-                    self._v1_storage.upload(rel_path, data)
+                    ok = self._v1_storage.upload(rel_path, data)
                 except Exception:
-                    # 统一打包失败时退回 safetensors 路径
+                    ok = False
+                if not ok:
+                    filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
+                    try:
+                        safetensors.torch.save_file({"kv_cache": kv_cache.detach().cpu()}, filename)
+                    except Exception:
+                        pass
+            else:
+                filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
+                try:
+                    safetensors.torch.save_file({"kv_cache": kv_cache.detach().cpu()}, filename)
+                except Exception:
                     pass
-
-            # 兼容：保留原有 safetensors 写入调试路径
-            filename = self._generate_filename_debug(layer_name, req.token_ids, req.mm_hashes)
-            tensors = {"kv_cache": kv_cache.detach().cpu()}
-            try:
-                safetensors.torch.save_file(tensors, filename)
-            except Exception:
-                pass
 
     def wait_for_save(self):
         return
