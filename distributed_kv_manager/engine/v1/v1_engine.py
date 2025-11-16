@@ -4,6 +4,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
+import time
 
 import safetensors
 import torch
@@ -15,6 +16,8 @@ from .base import (
 )
 from distributed_kv_manager.storage.v1.storage import create_v1_storage, V1Storage
 from distributed_kv_manager.config_loader import load_config_from_json
+from distributed_kv_manager.metadata.etcd import KVMetadataManager, KVMetadata
+from distributed_kv_manager.metadata.v1.metadata import V1MetadataClient
 
 try:
     from vllm.logger import init_logger as _vllm_init_logger  # type: ignore
@@ -96,11 +99,13 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             bs = 16
         self._block_size = int(bs)
         self._requests_need_load: dict[str, Any] = {}
+        self._folders_with_meta: set[str] = set()
         self._storage_path = self._resolve_dkv_path(vllm_config) or "/tmp/kvcache/v1"
         logger.info("[v1_engine] dkv_storage_path=%s", self._storage_path)
 
         # Step A1: 初始化 v1 storage 封装（统一从 config.json 读取存储配置）
         self._v1_storage: Optional[V1Storage]
+        self._v1_meta: Optional[V1MetadataClient] = None
         try:
             from types import SimpleNamespace
 
@@ -135,6 +140,8 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                         local_dir=self._storage_path,
                     )
 
+            self._kv_transfer_config = effective_kvt
+
             cfg = SimpleNamespace(kv_transfer_config=effective_kvt)
             self._v1_storage = create_v1_storage(cfg)
             logger.info(
@@ -142,6 +149,22 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 self._storage_path,
                 getattr(effective_kvt, "storage_type", "local"),
             )
+
+            try:
+                endpoints = getattr(self._kv_transfer_config, "etcd_endpoints", ["127.0.0.1:2379"])
+                prefix = "/kvmeta_v1"
+                self._v1_meta_manager = KVMetadataManager(endpoints=endpoints, prefix=prefix)
+                self._v1_meta = V1MetadataClient(self._v1_meta_manager)
+                self._v1_kv_expire_time = int(getattr(self._kv_transfer_config, "kv_expire_time", 0))
+                logger.info(
+                    "[v1_engine] v1 metadata initialized: endpoints=%s prefix=%s expire=%s",
+                    endpoints,
+                    prefix,
+                    self._v1_kv_expire_time,
+                )
+            except Exception:
+                self._v1_meta = None
+                self._v1_kv_expire_time = 0
         except Exception:
             # 存储初始化失败时仍保留 debug 目录路径，后续步骤再细化错误处理
             self._v1_storage = None

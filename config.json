@@ -9,7 +9,7 @@
     "kv_expire_time": 86400,
     "cleanup_interval": 3600,
     "crail_dir": "./crail_kvcache",
-    "local_dir": "/kvcache",
+    "local_dir": "/kvcache_v1/local",
     "dkv_storage_path": "/kvcache/v1",
     "store_after_prefill": true,
     "remote_dir": "/kvcache_v1/remote",
