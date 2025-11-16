@@ -254,6 +254,54 @@ The v1 engine stores KV as per-layer safetensors under a configurable root direc
 - Caching / composite support:
   - V1 delegates to `StorageFactory.create_storage`, so all existing options (`storage_type`, `composite`, `cache_mode`, `enable_ssd_caching`, `directory_layout`, etc.) still apply to the v1 path.
 
+#### V1 Mode Switch + DRAM Hash Cache
+
+- `use_v1` (bool): When `true`, v1-specific behavior is enabled across the stack.
+  - The storage backend returned by the factory is wrapped with a v1-only DRAM cache: `V1HashCachedStorage`.
+  - The LRU eviction unit is a full prompt hash directory (group of safetensors), not per-file.
+  - This wrapper is independent of the legacy `CachingStorage` and remains active even when `cache_mode: "none"`.
+
+- DRAM capacity setting (prefer GB):
+  - `mem_cache_capacity_gb` (float/int, preferred) → converted to bytes.
+  - `mem_cache_capacity_bytes` (int, fallback) → kept for backward compatibility.
+
+- Etcd-only hit/miss semantics:
+  - Existence check uses etcd metadata only. If etcd is down/unavailable, v1 treats it as a miss and does not scan the filesystem.
+  - After a STORE, a single aggregate metadata entry is written per hash directory (`status=1`, refreshed `last_access`).
+
+- Recommended minimal config for v1 hash-group DRAM caching:
+  ```json
+  {
+    "kv_transfer_config": {
+      "use_v1": true,
+      "storage_type": "v1_layered",
+      "local_dir": "/kvcache_v1/local",
+      "remote_dir": "/kvcache_v1/remote",
+      "remote_backend_type": "local",
+      "layer_split_front": -1,
+      "dkv_storage_path": "/kvcache/v1",
+      "cache_mode": "none",
+      "mem_cache_capacity_gb": 0.25,
+      "etcd_endpoints": ["127.0.0.1:2379"],
+      "kv_expire_time": 86400
+    }
+  }
+  ```
+
+#### V1 Prefetch
+
+- `enable_prefetch` (bool): enables prefetch at engine init for v1.
+- `v1_prefetch_top_k` (int): prefetches top-K hashes by `last_access` (from etcd) into DRAM.
+- Expected logs on startup (when enabled):
+  - `[v1_engine] scheduled initial v1 prefetch for top_k=K hashes`
+  - `[v1_engine] prefetch: top_k=K, actual=X`
+
+Testing quick recipe:
+- Clear previous state: `python3 scripts/clear_kv_store.py --yes`
+- Run a long request once to populate files + metadata.
+- Restart server with `use_v1: true`, `cache_mode: "none"`, and a small `mem_cache_capacity_gb` if you want to observe eviction.
+- Watch logs for prefetch lines above; DRAM hits then come from `V1HashCachedStorage`.
+
 ### Composite Storage Configuration
 
 Split KV layers so early layers (front) stay local, remaining (back) remote.

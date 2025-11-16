@@ -267,6 +267,54 @@ engine = init_engine()
 - 预取结果在 `only_mem` 与 `mem_and_ssd` 模式下都会优先落入内存缓存
 - 推荐新配置使用 `remote_dir`，旧的 `crail_dir` 保留兼容
 
+### v1 外部 KV（模式开关 + DRAM Hash 组缓存）
+
+- `use_v1`（bool）：打开后，激活 v1 专属路径：
+  - 工厂返回的后端会被 v1 专用的 DRAM 封装 `V1HashCachedStorage` 包裹；
+  - LRU 淘汰的最小单位是“一个 hash 目录”（即该 hash 下的所有 per-layer `.safetensors` 文件一起被驱逐），而不是单个文件；
+  - 该封装与旧的通用 `CachingStorage` 无关，即使 `cache_mode: "none"` 也会生效。
+
+- DRAM 容量配置（推荐使用 GB）：
+  - `mem_cache_capacity_gb`（float/int，推荐）→ 内部换算为字节；
+  - `mem_cache_capacity_bytes`（int，兼容旧字段）。
+
+- 命中/存在性判断（仅 etcd）：
+  - v1 只通过 etcd 元数据判断命中；etcd 不可达则直接视为 MISS，不会去遍历/探测本地或远端文件系统以避免放大延迟；
+  - 完成一次 STORE 后，会按“hash 目录”聚合写入一条元数据记录（`status=1`），并刷新 `last_access`。
+
+- v1 最小示例（推荐配置）：
+  ```json
+  {
+    "kv_transfer_config": {
+      "use_v1": true,
+      "storage_type": "v1_layered",
+      "local_dir": "/kvcache_v1/local",
+      "remote_dir": "/kvcache_v1/remote",
+      "remote_backend_type": "local",
+      "layer_split_front": -1,
+      "dkv_storage_path": "/kvcache/v1",
+      "cache_mode": "none",
+      "mem_cache_capacity_gb": 0.25,
+      "etcd_endpoints": ["127.0.0.1:2379"],
+      "kv_expire_time": 86400
+    }
+  }
+  ```
+
+#### v1 预取（Prefetch）
+
+- `enable_prefetch`（bool）：启用后，在引擎初始化时进行一次预取；
+- `v1_prefetch_top_k`（int）：从 etcd 读取未过期条目，按 `last_access` 降序取前 K 个 hash 目录，将其 per-layer 文件拉入 DRAM 缓存；
+- 启动日志期望：
+  - `[v1_engine] scheduled initial v1 prefetch for top_k=K hashes`
+  - `[v1_engine] prefetch: top_k=K, actual=X`
+
+测试建议：
+- 使用脚本清理：`python3 scripts/clear_kv_store.py --yes`；
+- 首次运行发送一次较长请求以产生文件与元数据；
+- 重启服务、确保 `use_v1: true` 与 `cache_mode: "none"`；将 `mem_cache_capacity_gb` 调小便于观察按“hash 目录”整组淘汰；
+- 留意上述预取日志；后续 DRAM 命中由 `V1HashCachedStorage` 提供。
+
 ## 使用方法
 
 ### 基本使用
