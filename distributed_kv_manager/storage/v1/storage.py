@@ -6,6 +6,10 @@ import torch
 
 from distributed_kv_manager.storage.base import AbstractStorage
 from distributed_kv_manager.storage.factory import StorageFactory
+from distributed_kv_manager.storage.v1.layout import (
+    pack_layer_kv_v1,
+    unpack_layer_kv_v1,
+)
 
 
 class V1Storage:
@@ -27,7 +31,27 @@ class V1Storage:
     def exists(self, file_path: str) -> bool:
         return self._backend.exists(file_path)
 
-    # Payload helpers (full payload preferred)
+    # ----- V1 single-layer helpers -----
+    def pack_layer_payload(
+        self,
+        kv_cache: torch.Tensor,
+        input_tokens: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        payload_meta: Optional[dict] = None,
+    ) -> bytes:
+        """打包单层 KV（形状与 engine 内部保持一致）。"""
+        return pack_layer_kv_v1(
+            kv_cache=kv_cache,
+            input_tokens=input_tokens,
+            slot_mapping=slot_mapping,
+            payload_meta=payload_meta,
+        )
+
+    def unpack_layer_payload(self, data: bytes) -> Tuple[Optional[torch.Tensor], dict]:
+        """从单层 payload 中恢复 kv_cache 及元信息。"""
+        return unpack_layer_kv_v1(data)
+
+    # ----- Legacy full-payload helpers (保留兼容性，当前 v1 引擎不直接使用) -----
     def pack_full_payload(
         self,
         k_cache: torch.Tensor,
@@ -56,4 +80,3 @@ def create_v1_storage(config) -> V1Storage:
     """
     backend = StorageFactory.create_storage(config)
     return V1Storage(backend)
-

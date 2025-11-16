@@ -151,7 +151,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 kv_cache_layer = kv_cache_attr[getattr(forward_context, 'virtual_engine', 0)]
                 kv_cache = None
 
-                # A2: 优先尝试通过 V1Storage 读取统一格式 payload
+                # 优先尝试通过 V1Storage 读取 v1 单层 layout
                 if self._v1_storage is not None:
                     try:
                         folder_abs = self._generate_foldername_debug(req.token_ids, req.mm_hashes, create_folder=False)
@@ -159,13 +159,9 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                         rel_path = os.path.join(folder_rel, f"{layer_name}.pt")
                         raw = self._v1_storage.download(rel_path)
                         if raw is not None:
-                            k_tensor, v_tensor = self._v1_storage.unpack_kv_data(raw)
-                            if k_tensor is not None and v_tensor is not None:
-                                # 期望形状 [num_layers, num_tokens, ...]，取第 0 层
-                                if k_tensor.dim() >= 2:
-                                    k_layer = k_tensor[0]
-                                    v_layer = v_tensor[0]
-                                    kv_cache = torch.stack([k_layer, v_layer], dim=0)
+                            kv_tensor, _info = self._v1_storage.unpack_layer_payload(raw)
+                            if kv_tensor is not None:
+                                kv_cache = kv_tensor.cuda()
                     except Exception:
                         kv_cache = None
 
@@ -194,27 +190,19 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         for req in metadata.requests:
             if not req.is_store:
                 continue
-            # 提取当前层的 KV 切片
+            # 提取当前层的 KV 切片（保持 engine 内部原始形状）
             kv_cache = _extract_kv_from_layer(kv_layer, req.slot_mapping, attn_metadata)
 
-            # A2: 使用 V1Storage 以统一 pack_full_payload 与 upload
+            # 使用 V1Storage v1 layout 以统一打包 / 上传
             if self._v1_storage is not None:
                 try:
-                    if kv_cache.dim() >= 2 and kv_cache.size(0) == 2:
-                        k_cache = kv_cache[0].unsqueeze(0)  # [1, num_tokens, ...]
-                        v_cache = kv_cache[1].unsqueeze(0)
-                    else:
-                        k_cache = kv_cache.unsqueeze(0)
-                        v_cache = kv_cache.unsqueeze(0)
-
                     input_tokens = req.token_ids
                     roi = torch.ones(input_tokens.shape[0], dtype=torch.bool, device=input_tokens.device)
                     slot_mapping = req.slot_mapping
                     payload_meta = {
                         "schema_version": 1,
-                        "num_layers": int(k_cache.shape[0]),
-                        "kv_dtype": str(k_cache.dtype),
-                        "kv_tail_shape": list(k_cache.shape[2:]),
+                        "kv_dtype": str(kv_cache.dtype),
+                        "kv_tail_shape": list(kv_cache.shape[1:]) if kv_cache.dim() >= 2 else [],
                         "slots_len": int(slot_mapping.numel()),
                     }
                     # 相对路径：<hash>/<layer>.pt
@@ -222,11 +210,9 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     folder_rel = os.path.basename(folder_abs)
                     rel_path = os.path.join(folder_rel, f"{layer_name}.pt")
 
-                    data = self._v1_storage.pack_full_payload(
-                        k_cache=k_cache,
-                        v_cache=v_cache,
+                    data = self._v1_storage.pack_layer_payload(
+                        kv_cache=kv_cache,
                         input_tokens=input_tokens,
-                        roi=roi,
                         slot_mapping=slot_mapping,
                         payload_meta=payload_meta,
                     )
