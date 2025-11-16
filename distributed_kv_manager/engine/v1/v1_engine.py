@@ -137,7 +137,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         attn_metadata = getattr(forward_context, 'attn_metadata', None)
         if attn_metadata is None:
             logger.warning("[v1_engine] start_load_kv: attn_metadata is None")
-            return
+            # return
         layers = getattr(forward_context, 'no_compile_layers', {})
         for req in metadata.requests:
             if req.is_store:
@@ -157,6 +157,12 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 )
                 folder_rel = os.path.basename(folder_abs)
                 rel_path = os.path.join(folder_rel, f"{layer_name}.safetensors")
+                logger.info(
+                    "[v1_engine] load path: layer=%s, folder_abs=%s, rel_path=%s",
+                    layer_name,
+                    folder_abs,
+                    rel_path,
+                )
                 if self._v1_storage is not None:
                     try:
                         raw = self._v1_storage.download(rel_path)
@@ -200,6 +206,13 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             )
             folder_rel = os.path.basename(folder_abs)
             rel_path = os.path.join(folder_rel, f"{layer_name}.safetensors")
+            logger.info(
+                "[v1_engine] save path: layer=%s, folder_abs=%s, rel_path=%s, is_store=%s",
+                layer_name,
+                folder_abs,
+                rel_path,
+                req.is_store,
+            )
 
             # 序列化为 safetensors bytes（内存缓冲）
             try:
@@ -242,6 +255,15 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             mm_hashes = [getattr(f, 'identifier', '') for f in (getattr(request, 'mm_features', []) or [])]
             num_tokens_to_check = _align_to_block_size(len(token_ids) - 1, self._block_size)
             folder = self._generate_foldername_debug(torch.tensor(token_ids)[:num_tokens_to_check], mm_hashes, create_folder=False)
+            logger.info(
+                "[v1_engine] get_num_new_matched_tokens: req=%s len=%d aligned=%d folder=%s exists=%s num_computed=%d",
+                getattr(request, 'request_id', getattr(request, 'req_id', '?')),
+                len(token_ids),
+                num_tokens_to_check,
+                folder,
+                os.path.exists(folder),
+                int(num_computed_tokens),
+            )
             if not os.path.exists(folder):
                 return 0, False
             logger.info("External Cache Hit!")
@@ -261,6 +283,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             token_ids = list(getattr(new_req, 'prompt_token_ids', []) or [])
             mm_hashes = [getattr(f, 'identifier', '') for f in (getattr(new_req, 'mm_features', []) or [])]
             if getattr(new_req, 'req_id', None) in self._requests_need_load:
+                logger.info(
+                    "[v1_engine] build_connector_meta: new_req=%s -> LOAD",
+                    getattr(new_req, 'req_id', None),
+                )
                 meta.add_request(
                     token_ids=token_ids,
                     block_ids=(getattr(new_req, 'block_ids', [[0]]) or [[0]])[0],
@@ -271,7 +297,20 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             else:
                 num_tokens_to_check = _align_to_block_size(len(token_ids) - 1, self._block_size)
                 folder = self._generate_foldername_debug(torch.tensor(token_ids)[:num_tokens_to_check], mm_hashes, create_folder=False)
-                if not os.path.exists(folder):
+                exists_flag = os.path.exists(folder)
+                logger.info(
+                    "[v1_engine] build_connector_meta: new_req=%s len=%d aligned=%d folder=%s exists=%s",
+                    getattr(new_req, 'req_id', None),
+                    len(token_ids),
+                    num_tokens_to_check,
+                    folder,
+                    exists_flag,
+                )
+                if not exists_flag:
+                    logger.info(
+                        "[v1_engine] build_connector_meta: new_req=%s -> STORE",
+                        getattr(new_req, 'req_id', None),
+                    )
                     meta.add_request(
                         token_ids=token_ids,
                         block_ids=(getattr(new_req, 'block_ids', [[0]]) or [[0]])[0],
