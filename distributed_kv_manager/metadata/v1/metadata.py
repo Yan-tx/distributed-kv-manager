@@ -7,12 +7,11 @@ from distributed_kv_manager.metadata.metadata_cache import MetadataCache
 
 
 class V1MetadataClient:
-    """Facade over KVMetadataManager + MetadataCache for v1 external KV.
+    """v1 外部 KV 的元数据访问封装。
 
-    v1 只需要「某个 hash 目录是否存在有效 KV」这一粒度，因此这里约定：
-    - file_path/key: 使用完整的 hash 目录绝对路径（例如 /kvcache_v1/index/<hash>）
-    - layer_id: v1 聚合 entry 使用 -1 作为占位
-    - session_id: 暂时使用常量占位，后续可与真实会话绑定
+    基于 KVMetadataManager + MetadataCache，提供：
+    - hash_exists: 判断某个 hash 目录是否有有效 KV 缓存
+    - mark_hash_stored: 在完成一次 STORE 后写入聚合元数据
     """
 
     def __init__(self, manager: KVMetadataManager, default_expire: int = 0) -> None:
@@ -26,24 +25,31 @@ class V1MetadataClient:
         layer_id: Optional[int] = None,
         session_id: Optional[bytes] = None,
     ) -> Optional[KVMetadata]:
-        return self._cache.get_metadata(key=key, layer_id=layer_id, session_id=session_id)
+        """从三层缓存 + etcd 获取一条元数据。"""
+        return self._cache.get_metadata(
+            key=key,
+            layer_id=layer_id,
+            session_id=session_id,
+        )
 
     def put_metadata(self, meta: KVMetadata) -> None:
+        """写入元数据到缓存，并异步刷入 etcd。"""
         self._cache.put_metadata(meta)
 
     def update_access_time(self, key: str) -> None:
+        """更新某条记录的 last_access 并异步写回。"""
         self._cache.update_access_time(key)
 
-    # ---- v1 专用 helper：按 hash 目录维度判断 / 标记存储 ----
+    # ---- v1 专用 helper：按 hash 目录维护存在性 / 聚合记录 ----
 
     def hash_exists(self, folder_abs: str) -> bool:
-        """判断某个 hash 目录是否存在有效 KV（未过期且 status==1）。"""
+        """判断某个 hash 目录是否存在有效的 KV（status==1 且未过期）。"""
         meta = self.get_metadata(key=folder_abs)
         if meta is None or getattr(meta, "status", 0) != 1:
             return False
         if meta.is_expired():
             return False
-        # 触发一次 access time 更新（异步写入）
+        # 刷新访问时间（异步写回）
         self.update_access_time(folder_abs)
         return True
 
@@ -59,7 +65,7 @@ class V1MetadataClient:
         now = int(_time.time())
         expire = int(self._default_expire or 0)
         session_id = b"v1_external_kv__"  # 16B 占位
-        layer_id = -1
+        layer_id = 0  # v1 聚合 entry 统一用 0 作为占位
         token_idx = str(int(num_tokens))
         meta = KVMetadata(
             session_id=session_id,
@@ -79,24 +85,24 @@ class V1MetadataClient:
         )
         self.put_metadata(meta)
 
-    # ---- 通用扫描接口（目前 v1 未使用，可保留） ----
+    # ---- 通用扫描接口：目前 v1 不强依赖，可用于调试 ----
 
     def scan_by_session_layer(
-        self, session_id: Optional[bytes], layer_id: Optional[int]
+        self,
+        session_id: Optional[bytes],
+        layer_id: Optional[int],
     ) -> List[KVMetadata]:
-        """Return committed metadata entries for a session/layer pair.
-
-        The returned list may be empty if the manager backend does not
-        provide listing support.
-        """
+        """按 session_id + layer_id 扫描已提交的元数据（可能为空）。"""
         out: List[KVMetadata] = []
         try:
             full_keys = self._manager.scan_all_metadata_keys()
         except Exception:
             full_keys = []
+
         prefix = getattr(self._manager, "prefix", "/kvmeta")
         sid = session_id
         lid = layer_id
+
         for fk in full_keys:
             try:
                 rel = fk
@@ -115,7 +121,9 @@ class V1MetadataClient:
         return out
 
     def stop(self) -> None:
+        """停止内部缓存的后台线程。"""
         try:
             self._cache.stop()
         except Exception:
             pass
+
