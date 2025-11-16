@@ -84,9 +84,6 @@ class _V1Metadata(KVConnectorMetadata):
 
 class V1KVEngineImpl(KVConnectorBase_V1):
     """V1 KV connector for vLLM v1 external cache.
-
-    - Scheduler �ϣ��ж� External Cache ���У�ͨ�� metadata ���Ƶ���/����
-    - Worker �ϣ�ʹ�� slot_mapping �� safetensors �е� KV ע����ȡ/����
     """
 
     def __init__(self, vllm_config: Any, role: KVConnectorRole):

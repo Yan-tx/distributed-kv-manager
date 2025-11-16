@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import torch
 
 from distributed_kv_manager.storage.base import AbstractStorage
+from distributed_kv_manager.storage.v1.hash_cached_storage import V1HashCachedStorage
 
 
 class V1Storage:
@@ -57,4 +58,28 @@ def create_v1_storage(config) -> V1Storage:
     from distributed_kv_manager.storage.factory import StorageFactory
 
     backend = StorageFactory.create_storage(config)
+
+    # 如果配置显式标记为 v1 版本，则在后端外再包一层 hash 级 DRAM 缓存。
+    kvt = getattr(config, "kv_transfer_config", config)
+    use_v1 = bool(getattr(kvt, "use_v1", False))
+    if use_v1:
+        # 容量：优先使用 mem_cache_capacity_gb，其次兼容旧的 mem_cache_capacity_bytes。
+        try:
+            cap_gb = getattr(kvt, "mem_cache_capacity_gb", None)
+        except Exception:
+            cap_gb = None
+        if cap_gb is not None:
+            try:
+                capacity_bytes = int(float(cap_gb) * 1024 * 1024 * 1024)
+            except Exception:
+                capacity_bytes = 256 * 1024 * 1024
+        else:
+            try:
+                capacity_bytes = int(
+                    getattr(kvt, "mem_cache_capacity_bytes", 256 * 1024 * 1024)
+                )
+            except Exception:
+                capacity_bytes = 256 * 1024 * 1024
+        backend = V1HashCachedStorage(backend, capacity_bytes)
+
     return V1Storage(backend)
