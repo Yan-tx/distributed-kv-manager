@@ -96,7 +96,6 @@ class V1KVEngineImpl(KVConnectorBase_V1):
             bs = 16
         self._block_size = int(bs)
         self._requests_need_load: dict[str, Any] = {}
-        # v1 共享存储根路径（后续会由 StorageFactory 接管）
         self._storage_path = self._resolve_dkv_path(vllm_config) or "/tmp/kvcache/v1"
         logger.info("[v1_engine] dkv_storage_path=%s", self._storage_path)
 
@@ -466,22 +465,3 @@ def init_v1_engine(vllm_config: Any, role: Any = None) -> V1KVEngineImpl:
 def destroy_v1_engine():
     global _CORE_SINGLETON
     _CORE_SINGLETON = None
-
-
-def v1_should_store(model_input: Any) -> Any:
-    return None
-
-
-def v1_store_kv(model_config: Any, parallel_config: Any, sampler: Any, model_executable: Any,
-                model_input: Any, kv_caches: list[torch.Tensor], store_status: Any,
-                hidden_states: Optional[torch.Tensor]) -> None:
-    return None
-
-
-def v1_should_retrieve(model_input: Any) -> Any:
-    return None
-
-
-def v1_retrieve_kv(model_executable: Any, model_input: Any,
-                   kv_caches: list[torch.Tensor], retrieve_status: Any) -> Any:
-    return None

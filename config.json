@@ -1,6 +1,6 @@
 {
   "kv_transfer_config": {
-    "storage_type": "local",
+    "storage_type": "v1_layered",
     "storage_dir": "/kvcache",
     "etcd_endpoints": ["127.0.0.1:2379"],
     "enable_ssd_caching": false,
@@ -11,7 +11,10 @@
     "crail_dir": "./crail_kvcache",
     "local_dir": "/kvcache",
     "dkv_storage_path": "/kvcache/v1",
-    "store_after_prefill": true
+    "store_after_prefill": true,
+    "remote_dir": "/kvcache_v1/remote",
+    "remote_backend_type": "local",
+    "layer_split_front": -1
   },
   "rank": 0,
   "local_rank": 0

@@ -157,10 +157,10 @@ engine = init_engine()
 ### 存储与缓存配置（基础）
 
 存储类型：
-- `local`：仅本地
+- `local`：本地存储
 - `crail`：Crail 分布式存储
-- `composite`：分层切分（本地 + 远端）
-
+- `composite`：分层存储，本地 + 远端
+- `v1_layered`：v1 专用的按层分级缓存模式，远端保存所有层，本地只缓存前 `layer_split_front` 层（基于 per-layer safetensors 文件）
 分层拆分（`composite`）：
 - `layer_split_front`：前段层数（优先）
 - `layer_split_ratio`：比例（未设置前段层数时生效，默认 0.5）
@@ -203,6 +203,19 @@ engine = init_engine()
     "ssd_cache_dir": "/tmp/ssd_cache",
     "mem_cache_capacity_bytes": 1073741824,
     "enable_prefetch": true
+  }
+}
+```
+
+6）仅 v1 分层缓存 + 远端持久化示例
+```json
+{
+  "kv_transfer_config": {
+    "storage_type": "v1_layered",
+    "local_dir": "/kvcache_v1/local",
+    "remote_dir": "/kvcache_v1/remote",
+    "remote_backend_type": "local",
+    "layer_split_front": 16
   }
 }
 ```
