@@ -5,7 +5,6 @@ from typing import Optional, Tuple
 import torch
 
 from distributed_kv_manager.storage.base import AbstractStorage
-from distributed_kv_manager.storage.factory import StorageFactory
 
 
 class V1Storage:
@@ -54,5 +53,8 @@ def create_v1_storage(config) -> V1Storage:
     The `config` is expected to have `kv_transfer_config` fields compatible
     with the existing StorageFactory.
     """
+    # 延迟导入 StorageFactory 以避免与 storage.factory 之间的循环依赖
+    from distributed_kv_manager.storage.factory import StorageFactory
+
     backend = StorageFactory.create_storage(config)
     return V1Storage(backend)
