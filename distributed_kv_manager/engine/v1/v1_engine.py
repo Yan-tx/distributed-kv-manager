@@ -65,6 +65,10 @@ class _ReqMeta:
 @dataclass
 class _V1Metadata(KVConnectorMetadata):
     requests: list[_ReqMeta] = field(default_factory=list)
+    # TODO: 按层流水化时可扩展字段：
+    # - reqs_to_load_layers: dict[req_id, dict[layer_name, TransferSpecLike]]
+    # - reqs_to_store_layers: dict[req_id, dict[layer_name, TransferSpecLike]]
+    # 填充位置：Scheduler.build_connector_meta；消费位置：start_load_kv / wait_for_layer_load / save_kv_layer
 
     def add_request(
         self,
@@ -203,6 +207,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         if metadata is None or not isinstance(metadata, _V1Metadata):
             logger.warning("[v1_engine] start_load_kv: connector metadata is None")
             return
+        # TODO: 逐层异步加载设计：
+        # - 若 metadata 带有 reqs_to_load_layers，逐层调度后台 download -> GPU copy 任务，记录 layer -> future
+        # - get_finished/connector_output 可回传完成的 layer，供调度侧释放/继续
+        # - 当前实现为同步一次性加载，未做后台并行
 
         attn_metadata = getattr(forward_context, "attn_metadata", None)
         if attn_metadata is None:
@@ -265,6 +273,8 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
+        # TODO: 若 start_load_kv 改为分层异步，应在此阻塞/轮询 layer_name 对应的任务完成
+        # 例如：future = self._layer_load_futures.get(layer_name); future.result(timeout=...).
         return
 
     def save_kv_layer(
@@ -277,6 +287,10 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         metadata: _V1Metadata = self._get_connector_metadata()  # type: ignore
         if metadata is None or not isinstance(metadata, _V1Metadata):
             return
+        # TODO: 分层异步存储思路：
+        # - 构造 layer_name 对应的 payload bytes（或 GPU -> host copy）后交给后台线程/IO 队列
+        # - 记录 layer -> future，等待 wait_for_save 或 get_finished 清理
+        # - 目前为同步写，阻塞在每层 save_kv_layer 内
 
         for req in metadata.requests:
             if not req.is_store:
@@ -353,11 +367,13 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                     pass
 
     def wait_for_save(self):
+        # TODO: 若 save_kv_layer 异步化，应在此等待所有 layer store 任务完成并处理失败重试
         return
 
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        # TODO: 若维护异步 load/store 任务，可在此返回按层/按请求完成的集合供调度侧消费
         return None, None
 
     # ---------------- Scheduler-side ----------------
@@ -629,7 +645,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
         return foldername
 
     def _run_initial_prefetch(self, top_k: int) -> None:
-        """一次性预取最近访问的部分 hash 到 DRAM Cache（按 last_access 排序）。"""
+        """一次性预取最近访问的部分 hash 到 DRAM Cache（按 last_access 排序）"""
         if self._v1_meta is None or self._v1_storage is None:
             return
         try:
@@ -672,7 +688,7 @@ class V1KVEngineImpl(KVConnectorBase_V1):
                 continue
 
     def _prefetch_hash_layers(self, hash_id: str) -> None:
-        """针对某个 hash 目录，遍历已有的 layer 文件并触发一次下载以填充 DRAM Cache。"""
+        """针对某个 hash 目录，遍历已有的 layer 文件并触发一次下载以填充 DRAM Cache"""
         if self._v1_storage is None:
             return
         base_local = getattr(self._kv_transfer_config, "local_dir", None)
